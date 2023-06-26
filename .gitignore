@@ -1,0 +1,4 @@
+/rootfs/*.xz
+/rootfs/rootfs-*
+/archives
+/u-boot
