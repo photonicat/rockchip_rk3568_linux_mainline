@@ -1,18 +1,19 @@
 #!/bin/bash
 
-DEB_REPO="http://deb.debian.org/debian"
+#DEB_REPO="http://deb.debian.org/debian"
+DEB_REPO="http://ftp.cn.debian.org/debian"
 DEB_DISTRO="bookworm"
-PREINSTALL_PACKAGES="nano,build-essential,autotools-dev,meson,git,libglib2.0-dev,libjson-c-dev,libgpiod-dev,libusb-1.0-0-dev"
+PREINSTALL_PACKAGES="nano,build-essential"
 OVERLAY_DIR="overlay-debian"
 SOURCES_LIST_FILE="sources.list.debian"
 
 ROOTFS_DIR="rootfs-debian"
-ROOTFS_BASE_ARCHIVE="rootfs-debian-base.tar.xz"
+ROOTFS_BASE_ARCHIVE="rootfs-debian-base.tar.gz"
 
-ROOTFS_MINIMAL_ARCHIVE="rootfs-debian-minimal.tar.xz"
+ROOTFS_MINIMAL_ARCHIVE="rootfs-debian-minimal.tar.gz"
 ROOTFS_MINIMAL_DIR="rootfs-debian-minimal"
 
-ROOTFS_FULL_ARCHIVE="rootfs-debian-full.tar.xz"
+ROOTFS_FULL_ARCHIVE="rootfs-debian-full.tar.gz"
 ROOTFS_FULL_DIR="rootfs-debian-full"
 
 if [ $(id -u) != "0" ]; then
@@ -23,7 +24,7 @@ fi
 if [ ! -f "${ROOTFS_BASE_ARCHIVE}" ]; then
     echo "No base rootfs found, start building..."
     debootstrap --arch=arm64 --include="${PREINSTALL_PACKAGES}" "${DEB_DISTRO}" "${ROOTFS_DIR}" "${DEB_REPO}"
-    tar --xform s:'^./':: -cJpf "${ROOTFS_BASE_ARCHIVE}" -C "${ROOTFS_DIR}" .
+    tar --xform s:'^./':: -czpf "${ROOTFS_BASE_ARCHIVE}" -C "${ROOTFS_DIR}" .
     echo "Base rootfs building completed."
 fi
 
@@ -31,13 +32,13 @@ if [ ! -f "${ROOTFS_MINIMAL_ARCHIVE}" ]; then
     echo "No rootfs-minimal found, start building..."
     if [ ! -d "${ROOTFS_MINIMAL_DIR}" ]; then
         mkdir -p "${ROOTFS_MINIMAL_DIR}"
-        tar -xJf "${ROOTFS_BASE_ARCHIVE}" -C "${ROOTFS_MINIMAL_DIR}"
+        tar -xzf "${ROOTFS_BASE_ARCHIVE}" -C "${ROOTFS_MINIMAL_DIR}"
     fi
 
     cp /usr/bin/qemu-aarch64-static "${ROOTFS_MINIMAL_DIR}/usr/bin/"
 
     if [ -d "${OVERLAY_DIR}" ]; then
-        cp -rf "${OVERLAY_DIR}" "${ROOTFS_MINIMAL_DIR}/"
+        cp -rf "${OVERLAY_DIR}/." "${ROOTFS_MINIMAL_DIR}/"
     fi
 
     cp -f "${SOURCES_LIST_FILE}" "${ROOTFS_MINIMAL_DIR}/etc/apt/sources.list"
@@ -91,7 +92,7 @@ EOF
 
     umount -f "${ROOTFS_MINIMAL_DIR}/dev"
 
-    tar --xform s:'^./':: -cJpf "${ROOTFS_MINIMAL_ARCHIVE}" -C "${ROOTFS_MINIMAL_DIR}" .
+    tar --xform s:'^./':: -czpf "${ROOTFS_MINIMAL_ARCHIVE}" -C "${ROOTFS_MINIMAL_DIR}" .
     echo "rootfs-minimal building completed."
 fi
 
@@ -100,7 +101,7 @@ if [ ! -f "${ROOTFS_FULL_ARCHIVE}" ]; then
     echo "No rootfs-full found, start building..."
     if [ ! -d "${ROOTFS_FULL_DIR}" ]; then
         mkdir -p "${ROOTFS_FULL_DIR}"
-        tar -xJf "${ROOTFS_MINIMAL_ARCHIVE}" -C "${ROOTFS_FULL_DIR}"
+        tar -xzf "${ROOTFS_MINIMAL_ARCHIVE}" -C "${ROOTFS_FULL_DIR}"
     fi
 
     cp -f "${SOURCES_LIST_FILE}" "${ROOTFS_FULL_DIR}/etc/apt/sources.list"
@@ -137,6 +138,6 @@ EOF
 
     umount -f "${ROOTFS_FULL_DIR}/dev"
 
-    tar --xform s:'^./':: -cJpf "${ROOTFS_FULL_ARCHIVE}" -C "${ROOTFS_FULL_DIR}" .
+    tar --xform s:'^./':: -czpf "${ROOTFS_FULL_ARCHIVE}" -C "${ROOTFS_FULL_DIR}" .
     echo "rootfs-full building completed."
 fi

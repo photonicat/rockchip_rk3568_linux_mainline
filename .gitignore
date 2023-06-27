@@ -2,3 +2,4 @@
 /rootfs/rootfs-*
 /archives
 /u-boot
+/kernel

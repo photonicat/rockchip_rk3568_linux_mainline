@@ -1,0 +1,18 @@
+--- a/drivers/power/reset/gpio-poweroff.c	2023-01-24 15:24:44.000000000 +0900
++++ b/drivers/power/reset/gpio-poweroff.c	2023-02-09 19:55:03.270739263 +0900
+@@ -51,6 +51,7 @@
+ 	bool input = false;
+ 	enum gpiod_flags flags;
+ 
++#ifndef CONFIG_ARCH_ROCKCHIP
+ 	/* If a pm_power_off function has already been added, leave it alone */
+ 	if (pm_power_off != NULL) {
+ 		dev_err(&pdev->dev,
+@@ -58,6 +59,7 @@
+ 		       __func__);
+ 		return -EBUSY;
+ 	}
++#endif
+ 
+ 	input = device_property_read_bool(&pdev->dev, "input");
+ 	if (input)
