@@ -5,7 +5,7 @@ export PATH="${PATH}:/sbin:/usr/sbin"
 
 IMG_FILE="deploy/rk3568-debian-minimal.img"
 ROOTFS_FILE="rootfs/rootfs-debian-minimal.tar.gz"
-ROOTFS_BUILD_SCRIPT="./rootfs/mk-rootfs-debian.sh"
+ROOTFS_BUILD_SCRIPT="mk-rootfs-debian.sh"
 PARTITION_SCRIPT="scripts/photonicat-disk-parts.sfdisk"
 BOOTFS_IMG_FILE="deploy/rk3568-debian-minimal-bootfs.img"
 ROOTFS_IMG_FILE="deploy/rk3568-debian-minimal-rootfs.img"
@@ -49,9 +49,10 @@ if [ ! -f "deploy/boot.scr" ]; then
     exit 4
 fi
 
-
 if [ ! -f "${ROOTFS_FILE}" ]; then
-    "${ROOTFS_BUILD_SCRIPT}"
+    cd "${WORKDIR}/rootfs"
+    "./${ROOTFS_BUILD_SCRIPT}"
+    cd "${WORKDIR}"
 fi
 
 echo "Creating disk image..."
