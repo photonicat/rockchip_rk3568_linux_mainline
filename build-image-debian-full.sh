@@ -84,7 +84,7 @@ mkfs.ext4 -F "${ROOTFS_IMG_FILE}"
 
 mkdir -p "${TMP_MOUNT_DIR}/rootfs"
 mount "${ROOTFS_IMG_FILE}" "${TMP_MOUNT_DIR}/rootfs"
-tar -xpf "${ROOTFS_FILE}" -C "${TMP_MOUNT_DIR}/rootfs"
+tar -xpf "${ROOTFS_FILE}" --xattrs --xattrs-include='*' -C "${TMP_MOUNT_DIR}/rootfs"
 tar -xf "kernel/deploy/kmods.tar.gz" -C "${TMP_MOUNT_DIR}/rootfs/usr"
 umount -f "${TMP_MOUNT_DIR}/rootfs"
 rmdir "${TMP_MOUNT_DIR}/rootfs"

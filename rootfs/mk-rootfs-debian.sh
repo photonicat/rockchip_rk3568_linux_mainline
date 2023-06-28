@@ -24,7 +24,7 @@ fi
 if [ ! -f "${ROOTFS_BASE_ARCHIVE}" ]; then
     echo "No base rootfs found, start building..."
     debootstrap --arch=arm64 --include="${PREINSTALL_PACKAGES}" "${DEB_DISTRO}" "${ROOTFS_DIR}" "${DEB_REPO}"
-    tar --xform s:'^./':: -czpf "${ROOTFS_BASE_ARCHIVE}" -C "${ROOTFS_DIR}" .
+    tar --xform s:'^./':: -czpf "${ROOTFS_BASE_ARCHIVE}" --xattrs -C "${ROOTFS_DIR}" .
     echo "Base rootfs building completed."
 fi
 
@@ -32,7 +32,7 @@ if [ ! -f "${ROOTFS_MINIMAL_ARCHIVE}" ]; then
     echo "No rootfs-minimal found, start building..."
     if [ ! -d "${ROOTFS_MINIMAL_DIR}" ]; then
         mkdir -p "${ROOTFS_MINIMAL_DIR}"
-        tar -xzf "${ROOTFS_BASE_ARCHIVE}" -C "${ROOTFS_MINIMAL_DIR}"
+        tar -xzf "${ROOTFS_BASE_ARCHIVE}" --xattrs --xattrs-include='*' -C "${ROOTFS_MINIMAL_DIR}"
     fi
 
     cp /usr/bin/qemu-aarch64-static "${ROOTFS_MINIMAL_DIR}/usr/bin/"
@@ -94,7 +94,7 @@ EOF
 
     umount -f "${ROOTFS_MINIMAL_DIR}/dev"
 
-    tar --xform s:'^./':: -czpf "${ROOTFS_MINIMAL_ARCHIVE}" -C "${ROOTFS_MINIMAL_DIR}" .
+    tar --xform s:'^./':: -czpf "${ROOTFS_MINIMAL_ARCHIVE}" --xattrs -C "${ROOTFS_MINIMAL_DIR}" .
     echo "rootfs-minimal building completed."
 fi
 
@@ -103,7 +103,7 @@ if [ ! -f "${ROOTFS_FULL_ARCHIVE}" ]; then
     echo "No rootfs-full found, start building..."
     if [ ! -d "${ROOTFS_FULL_DIR}" ]; then
         mkdir -p "${ROOTFS_FULL_DIR}"
-        tar -xzf "${ROOTFS_MINIMAL_ARCHIVE}" -C "${ROOTFS_FULL_DIR}"
+        tar -xzf "${ROOTFS_MINIMAL_ARCHIVE}" --xattrs --xattrs-include='*' -C "${ROOTFS_FULL_DIR}"
     fi
 
     cp -f "${SOURCES_LIST_FILE}" "${ROOTFS_FULL_DIR}/etc/apt/sources.list"
@@ -134,6 +134,6 @@ EOF
 
     umount -f "${ROOTFS_FULL_DIR}/dev"
 
-    tar --xform s:'^./':: -czpf "${ROOTFS_FULL_ARCHIVE}" -C "${ROOTFS_FULL_DIR}" .
+    tar --xform s:'^./':: -czpf "${ROOTFS_FULL_ARCHIVE}" --xattrs -C "${ROOTFS_FULL_DIR}" .
     echo "rootfs-full building completed."
 fi
