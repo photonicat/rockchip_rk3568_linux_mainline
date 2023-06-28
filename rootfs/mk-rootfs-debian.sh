@@ -64,6 +64,7 @@ dpkg-reconfigure locales
 useradd photonicat -m -u 1000 -s /bin/bash || true
 usermod -a -G sudo photonicat
 usermod -a -G video photonicat
+usermod -a -G render photonicat
 echo 'root:photonicat' | chpasswd
 echo 'photonicat:photonicat' | chpasswd
 ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
@@ -81,8 +82,9 @@ apt-get install -fy sudo fakeroot devscripts cmake binfmt-support dh-make \
     dh-exec device-tree-compiler bc cpio parted dosfstools mtools \
     libssl-dev dpkg-dev isc-dhcp-client-ddns build-essential libgpiod2 \
     libjson-c5 libusb-1.0-0 nano network-manager i2c-tools ntp git \
-    openssh-server build-essential autotools-dev meson libglib2.0-dev \
-    libjson-c-dev libgpiod-dev libusb-1.0-0-dev gdb
+    usbutils pciutils htop openssh-server build-essential autotools-dev \
+    meson libglib2.0-dev libjson-c-dev libgpiod-dev libusb-1.0-0-dev gdb \
+    p7zip-full net-tools iotop wget
 
 apt-get clean
 rm -f /etc/resolv.conf
@@ -116,18 +118,12 @@ export DEBIAN_FRONTEND=noninteractive
 export LANG=en_US.UTF-8
 
 apt-get install -fy pipewire pipewire-alsa pipewire-pulse pavucontrol \
-    zenity xfce4 lightdm fonts-cantarell fonts-wqy-zenhei \
-    fonts-noto-cjk ibus ibus-libpinyin ibus-anthy ibus-gtk ibus-gtk3 \
-    im-config parole gstreamer1.0-plugins-bad gstreamer1.0-plugins-base \
-    gstreamer1.0-tools gstreamer1.0-alsa gstreamer1.0-plugins-base-apps \
-    cheese glmark2 glmark2-wayland firefox-esr blackbird-gtk-theme \
-    bluebird-gtk-theme audacious
-
-echo "# im-config(8) generated on Mon, 12 Dec 2022 14:26:48 +0800" >/home/photonicat/.xinputrc
-echo "run_im ibus" >>/home/photonicat/.xinputrc
-echo "# im-config signature: 17cc603f959ab57482fe436d81262b61  -" >>/home/photonicat/.xinputrc
-chmod +x /home/photonicat/.xinputrc
-chown photonicat:photonicat /home/photonicat/.xinputrc
+    zenity gnome celluloid fonts-cantarell fonts-wqy-zenhei \
+    fonts-noto-cjk ibus ibus-libpinyin ibus-gtk ibus-gtk3 \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-tools gstreamer1.0-alsa \
+    gstreamer1.0-plugins-base-apps cheese glmark2-es2 glmark2-es2-wayland \
+    firefox-esr audacious gnome-shell-extensions gnome-shell-extensions-extra vlc
 
 apt-get clean
 

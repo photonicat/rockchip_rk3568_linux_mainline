@@ -1,0 +1,13 @@
+[Unit]
+Description=PCat Manager daemon
+After=syslog.target
+
+[Service]
+#ExecStartPre=
+ExecStart=/usr/local/bin/pcat-manager --distro
+ExecReload=/bin/kill -HUP $MAINPID
+Restart = always
+Type = simple
+
+[Install]
+WantedBy=multi-user.target

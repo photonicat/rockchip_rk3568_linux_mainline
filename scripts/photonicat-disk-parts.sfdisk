@@ -1,0 +1,2 @@
+start=65536, size=256MiB, type="EFI System"
+size=6144MiB, type="Linux filesystem"

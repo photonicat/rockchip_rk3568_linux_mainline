@@ -73,5 +73,8 @@ make O=build modules_install INSTALL_MOD_PATH="${WORKDIR}/kernel/deploy/modules"
 tar --xform s:'^./':: -czf deploy/kmods.tar.gz -C "${WORKDIR}/kernel/deploy/modules" .
 cd "${WORKDIR}"
 
+mkimage -A arm -O linux -T script -C none -a 0 -e 0 -d scripts/photonicat.bootscript deploy/boot.scr
+
+echo "Base system builds completed."
 #dd if=idbloader.img of=/dev/mmcblk0 seek=64 conv=notrunc
 #dd if=u-boot.itb of=/dev/mmcblk0 seek=16384 conv=notrunc
