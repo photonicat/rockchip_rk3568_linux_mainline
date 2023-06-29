@@ -84,7 +84,8 @@ apt-get install -fy sudo fakeroot devscripts cmake binfmt-support dh-make \
     libjson-c5 libusb-1.0-0 nano network-manager i2c-tools ntp git \
     usbutils pciutils htop openssh-server build-essential autotools-dev \
     meson libglib2.0-dev libjson-c-dev libgpiod-dev libusb-1.0-0-dev gdb \
-    p7zip-full net-tools iotop wget
+    p7zip-full net-tools iotop wget firmware-linux-free firmware-linux-nonfree \
+    firmware-misc-nonfree firmware-atheros firmware-iwlwifi firmware-brcm80211
 
 apt-get clean
 rm -f /etc/resolv.conf
@@ -126,6 +127,8 @@ apt-get install -fy pipewire pipewire-alsa pipewire-pulse pavucontrol \
     firefox-esr audacious gnome-shell-extensions gnome-shell-extensions-extra vlc
 
 apt-get clean
+
+usermod -a -G render Debian-gdm
 
 rm -f /etc/resolv.conf
 ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf
