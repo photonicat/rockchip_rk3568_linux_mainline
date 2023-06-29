@@ -1,20 +1,19 @@
 #!/bin/bash
 
-#DEB_REPO="http://deb.debian.org/debian"
-DEB_REPO="http://ftp.cn.debian.org/debian"
-DEB_DISTRO="bookworm"
+DEB_REPO="http://mirrors.ustc.edu.cn/ubuntu-ports"
+DEB_DISTRO="jammy"
 PREINSTALL_PACKAGES="nano,build-essential"
-OVERLAY_DIR="overlay-debian"
-SOURCES_LIST_FILE="sources.list.debian"
+OVERLAY_DIR="overlay-ubuntu"
+SOURCES_LIST_FILE="sources.list.ubuntu"
 
-ROOTFS_DIR="rootfs-debian"
-ROOTFS_BASE_ARCHIVE="rootfs-debian-base.tar.gz"
+ROOTFS_DIR="rootfs-ubuntu"
+ROOTFS_BASE_ARCHIVE="rootfs-ubuntu-base.tar.gz"
 
-ROOTFS_MINIMAL_ARCHIVE="rootfs-debian-minimal.tar.gz"
-ROOTFS_MINIMAL_DIR="rootfs-debian-minimal"
+ROOTFS_MINIMAL_ARCHIVE="rootfs-ubuntu-minimal.tar.gz"
+ROOTFS_MINIMAL_DIR="rootfs-ubuntu-minimal"
 
-ROOTFS_FULL_ARCHIVE="rootfs-debian-full.tar.gz"
-ROOTFS_FULL_DIR="rootfs-debian-full"
+ROOTFS_FULL_ARCHIVE="rootfs-ubuntu-full.tar.gz"
+ROOTFS_FULL_DIR="rootfs-ubuntu-full"
 
 if [ $(id -u) != "0" ]; then
     echo "Need root privilege to create rootfs!"
@@ -69,9 +68,9 @@ echo 'root:photonicat' | chpasswd
 echo 'photonicat:photonicat' | chpasswd
 ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 echo "Asia/Shanghai" >/etc/timezone
-echo "photonicat-debian" >/etc/hostname
+echo "photonicat-ubuntu" >/etc/hostname
 echo "127.0.0.1 localhost" >/etc/hosts
-echo "127.0.1.1 photonicat-debian" >>/etc/hosts
+echo "127.0.1.1 photonicat-ubuntu" >>/etc/hosts
 echo "" >>/etc/hosts
 echo "# The following lines are desirable for IPv6 capable hosts" >>/etc/hosts
 echo "::1       localhost ip6-localhost ip6-loopback" >>/etc/hosts
@@ -84,8 +83,7 @@ apt-get install -fy sudo fakeroot devscripts cmake binfmt-support dh-make \
     libjson-c5 libusb-1.0-0 nano network-manager i2c-tools ntp git \
     usbutils pciutils htop openssh-server build-essential autotools-dev \
     meson libglib2.0-dev libjson-c-dev libgpiod-dev libusb-1.0-0-dev gdb \
-    p7zip-full net-tools iotop wget firmware-linux-free firmware-linux-nonfree \
-    firmware-misc-nonfree firmware-atheros firmware-iwlwifi firmware-brcm80211
+    p7zip-full net-tools iotop wget linux-firmware
 
 apt-get clean
 
@@ -121,17 +119,17 @@ if [ ! -f "${ROOTFS_FULL_ARCHIVE}" ]; then
 export DEBIAN_FRONTEND=noninteractive
 export LANG=en_US.UTF-8
 
-apt-get install -fy pipewire pipewire-alsa pipewire-pulse pavucontrol \
-    zenity gnome celluloid fonts-cantarell fonts-wqy-zenhei \
+apt-get install -fy pipewire pipewire-pulse pavucontrol \
+    zenity ubuntu-gnome-desktop gnome celluloid fonts-cantarell fonts-wqy-zenhei \
     fonts-noto-cjk ibus ibus-libpinyin ibus-gtk ibus-gtk3 \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly gstreamer1.0-tools gstreamer1.0-alsa \
     gstreamer1.0-plugins-base-apps cheese glmark2-es2 glmark2-es2-wayland \
-    firefox-esr audacious gnome-shell-extensions gnome-shell-extensions-extra vlc
+    firefox audacious gnome-shell-extensions vlc
 
 apt-get clean
 
-usermod -a -G render Debian-gdm
+usermod -a -G render gdm
 
 rm -f /etc/resolv.conf
 ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf
