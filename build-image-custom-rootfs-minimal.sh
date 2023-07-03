@@ -3,12 +3,11 @@
 export WORKDIR="$(pwd)"
 export PATH="${PATH}:/sbin:/usr/sbin"
 
-IMG_FILE="deploy/rk3568-ubuntu-minimal.img"
-ROOTFS_FILE="rootfs/rootfs-ubuntu-minimal.tar.gz"
-ROOTFS_BUILD_SCRIPT="mk-rootfs-ubuntu.sh"
+IMG_FILE="deploy/rk3568-custom-minimal.img"
+ROOTFS_FILE="${1}"
 PARTITION_SCRIPT="scripts/photonicat-disk-parts-minimal.sfdisk"
-BOOTFS_IMG_FILE="deploy/rk3568-ubuntu-minimal-bootfs.img"
-ROOTFS_IMG_FILE="deploy/rk3568-ubuntu-minimal-rootfs.img"
+BOOTFS_IMG_FILE="deploy/rk3568-custom-minimal-bootfs.img"
+ROOTFS_IMG_FILE="deploy/rk3568-custom-minimal-rootfs.img"
 
 IMG_SIZE="7168"
 BOOTFS_SIZE="256"
@@ -19,40 +18,39 @@ if [ $(id -u) != "0" ]; then
     exit 1
 fi
 
+if [ ! -f "${ROOTFS_FILE}" ]; then
+    echo "Need a rootfs tarball to make system image!"
+    exit 2
+fi
+
 if [ ! -f "u-boot/deploy/idbloader.img" ]; then
     echo "Missing idbloader.img, build u-boot first!"
-    exit 2
+    exit 3
 fi
 
 if [ ! -f "u-boot/deploy/u-boot.itb" ]; then
     echo "Missing u-boot.itb, build u-boot first!"
-    exit 2
+    exit 3
 fi
 
 if [ ! -f "kernel/deploy/Image" ]; then
     echo "Missing kernel image, build kernel first!"
-    exit 3
+    exit 4
 fi
 
 if [ ! -f "kernel/deploy/rk3568-photonicat.dtb" ]; then
     echo "Missing kernel device tree, build kernel first!"
-    exit 3
+    exit 4
 fi
 
 if [ ! -f "kernel/deploy/kmods.tar.gz" ]; then
     echo "Missing kernel modules, build kernel first!"
-    exit 3
+    exit 4
 fi
 
 if [ ! -f "deploy/boot.scr" ]; then
     echo "Missing boot.scr, build boot script first!"
-    exit 4
-fi
-
-if [ ! -f "${ROOTFS_FILE}" ]; then
-    cd "${WORKDIR}/rootfs"
-    "./${ROOTFS_BUILD_SCRIPT}"
-    cd "${WORKDIR}"
+    exit 5
 fi
 
 echo "Creating disk image..."
@@ -96,5 +94,4 @@ echo "Making system image..."
 zcat "${BOOTFS_IMG_FILE}.gz" | dd of="${IMG_FILE}" bs=1M seek=32 conv=notrunc
 zcat "${ROOTFS_IMG_FILE}.gz" | dd of="${IMG_FILE}" bs=1M seek="$(expr 32 + ${BOOTFS_SIZE})" conv=notrunc
 gzip -f "${IMG_FILE}"
-
 echo "Create system image completed."

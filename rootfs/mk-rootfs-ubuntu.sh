@@ -125,11 +125,12 @@ apt-get install -fy pipewire pipewire-pulse pavucontrol \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly gstreamer1.0-tools gstreamer1.0-alsa \
     gstreamer1.0-plugins-base-apps cheese glmark2-es2 glmark2-es2-wayland \
-    firefox audacious gnome-shell-extensions vlc
+    firefox audacious gnome-shell-extensions vlc gparted
 
 apt-get clean
 
 usermod -a -G render gdm
+touch /usr/share/pipewire/media-session.d/with-pulseaudio
 
 rm -f /etc/resolv.conf
 ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf

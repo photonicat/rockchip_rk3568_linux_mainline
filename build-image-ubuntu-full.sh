@@ -6,13 +6,13 @@ export PATH="${PATH}:/sbin:/usr/sbin"
 IMG_FILE="deploy/rk3568-ubuntu-full.img"
 ROOTFS_FILE="rootfs/rootfs-ubuntu-full.tar.gz"
 ROOTFS_BUILD_SCRIPT="mk-rootfs-ubuntu.sh"
-PARTITION_SCRIPT="scripts/photonicat-disk-parts.sfdisk"
+PARTITION_SCRIPT="scripts/photonicat-disk-parts-full.sfdisk"
 BOOTFS_IMG_FILE="deploy/rk3568-ubuntu-full-bootfs.img"
 ROOTFS_IMG_FILE="deploy/rk3568-ubuntu-full-rootfs.img"
 
-IMG_SIZE="7168"
+IMG_SIZE="13312"
 BOOTFS_SIZE="256"
-ROOTFS_SIZE="6144"
+ROOTFS_SIZE="12288"
 
 if [ $(id -u) != "0" ]; then
     echo "Need root privilege to create rootfs!"
@@ -77,6 +77,7 @@ cp -v "kernel/deploy/rk3568-photonicat.dtb" "${TMP_MOUNT_DIR}/bootfs/"
 cp -v deploy/boot.scr "${TMP_MOUNT_DIR}/bootfs/"
 umount -f "${TMP_MOUNT_DIR}/bootfs"
 rmdir "${TMP_MOUNT_DIR}/bootfs"
+gzip -f "${BOOTFS_IMG_FILE}"
 
 echo "Creating rootfs..."
 dd if=/dev/zero of="${ROOTFS_IMG_FILE}" bs=1M count="${ROOTFS_SIZE}"
@@ -88,11 +89,13 @@ tar -xpf "${ROOTFS_FILE}" --xattrs --xattrs-include='*' -C "${TMP_MOUNT_DIR}/roo
 tar -xf "kernel/deploy/kmods.tar.gz" -C "${TMP_MOUNT_DIR}/rootfs/usr"
 umount -f "${TMP_MOUNT_DIR}/rootfs"
 rmdir "${TMP_MOUNT_DIR}/rootfs"
+gzip -f "${ROOTFS_IMG_FILE}"
 
 rmdir "${TMP_MOUNT_DIR}"
 
 echo "Making system image..."
-dd if="${BOOTFS_IMG_FILE}" of="${IMG_FILE}" bs=1M seek=32 conv=notrunc
-dd if="${ROOTFS_IMG_FILE}" of="${IMG_FILE}" bs=1M seek="$(expr 32 + ${BOOTFS_SIZE})" conv=notrunc
+zcat "${BOOTFS_IMG_FILE}.gz" | dd of="${IMG_FILE}" bs=1M seek=32 conv=notrunc
+zcat "${ROOTFS_IMG_FILE}.gz" | dd of="${IMG_FILE}" bs=1M seek="$(expr 32 + ${BOOTFS_SIZE})" conv=notrunc
+gzip -f "${IMG_FILE}"
 
 echo "Create system image completed."

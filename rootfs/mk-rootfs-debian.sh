@@ -127,7 +127,8 @@ apt-get install -fy pipewire pipewire-alsa pipewire-pulse pavucontrol \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly gstreamer1.0-tools gstreamer1.0-alsa \
     gstreamer1.0-plugins-base-apps cheese glmark2-es2 glmark2-es2-wayland \
-    firefox-esr audacious gnome-shell-extensions gnome-shell-extensions-extra vlc
+    firefox-esr audacious gnome-shell-extensions gnome-shell-extensions-extra vlc \
+    gparted
 
 apt-get clean
 
