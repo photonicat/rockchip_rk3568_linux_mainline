@@ -1,0 +1,57 @@
+photonicat mainline system image building scripts.
+
+System Requirements:
+Debian 12(Bookworm) / Ubuntu 22.04 (Jammy) or above
+
+Install Dependency:
+sudo apt-get install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+   bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \         
+   git gperf haveged help2man intltool libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+   libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+   nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+   libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \           
+   wget xmlto xxd zlib1g-dev debootstrap qemu-user-static sfdisk gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+How to Build System Images:
+
+1. Build u-boot & kernel:
+
+./build-base.sh
+
+2. Build system image:
+
+Minimal system images will need at least 8GiB eMMC. Full-size system image will need at
+least 16GiB eMMC and at least 2GiB RAM size.
+
+#Build minimal Debian system image, output image: deploy/rk3568-debian-minimal.img.gz
+sudo ./build-image-debian-minimal.sh
+
+#Build full-size Debian system image, output image: deploy/rk3568-debian-full.img.gz
+sudo ./build-image-debian-full.sh
+
+#Build minimal Ubuntu system image, output image: deploy/rk3568-debian-minimal.img.gz
+sudo ./build-image-ubuntu-minimal.sh
+
+#Build full-size Ubuntu system image, output image: deploy/rk3568-debian-full.img.gz
+sudo ./build-image-ubuntu-full.sh
+
+System image should be uncompressed by gunzip before being installed to device.
+
+3. Prepare upgrade tool:
+
+git clone https://github.com/rockchip-linux/rkdeveloptool.git
+cd rkdeveloptool
+sudo apt-get install libudev-dev libusb-1.0-0-dev dh-autoreconf
+aclocal
+autoreconf -i
+autoheader
+automake --add-missing
+./configure
+make
+wget https://dl.photonicat.com/images/MiniLoaderAll.bin
+
+4. Install system image to device:
+
+sudo ./rkdeveloptool db MiniLoaderAll.bin
+sudo ./rkdeveloptool wl 0 system.img #Replace system.img to the uncompressed system image you get.
+sudo ./rkdeveloptool rd
