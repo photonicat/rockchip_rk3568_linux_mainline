@@ -4,7 +4,7 @@ ARCHIVE_DIR="archives"
 WORKDIR="$(pwd)"
 
 UBOOT_VERSION="u-boot-2023.04"
-KERNEL_VERSION="linux-6.1.35"
+KERNEL_VERSION="linux-6.1.38"
 
 UBOOT_ARCHIVE="${UBOOT_VERSION}.tar.bz2"
 KERNEL_ARCHIVE="${KERNEL_VERSION}.tar.xz"
@@ -51,7 +51,7 @@ if [ ! -d "kernel" ]; then
     mv "${KERNEL_VERSION}" kernel
 
     cd "${WORKDIR}/kernel"
-    for i in "${WORKDIR}/patches/kernel/"*; do patch -p1 < "${i}"; done
+    for i in "${WORKDIR}/patches/kernel/"*; do patch -Np1 < "${i}"; done
     cp -rf "${WORKDIR}/patches/kernel-overlay/." ./
 
     cd "${WORKDIR}"
