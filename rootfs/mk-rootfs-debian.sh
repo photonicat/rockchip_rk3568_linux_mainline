@@ -85,7 +85,8 @@ apt-get install -fy sudo fakeroot devscripts cmake binfmt-support dh-make \
     usbutils pciutils htop openssh-server build-essential autotools-dev \
     meson libglib2.0-dev libjson-c-dev libgpiod-dev libusb-1.0-0-dev gdb \
     p7zip-full net-tools iotop wget firmware-linux-free firmware-linux-nonfree \
-    firmware-misc-nonfree firmware-atheros firmware-iwlwifi firmware-brcm80211
+    firmware-misc-nonfree firmware-atheros firmware-iwlwifi firmware-brcm80211 \
+    bridge-utils
 
 apt-get clean
 
