@@ -4,7 +4,7 @@ ARCHIVE_DIR="archives"
 WORKDIR="$(pwd)"
 
 UBOOT_VERSION="u-boot-2023.04"
-KERNEL_VERSION="linux-6.1.59"
+KERNEL_VERSION="linux-6.1.86"
 
 UBOOT_ARCHIVE="${UBOOT_VERSION}.tar.bz2"
 KERNEL_ARCHIVE="${KERNEL_VERSION}.tar.xz"
@@ -14,8 +14,8 @@ KERNEL_SITE="https://cdn.kernel.org/pub/linux/kernel/v6.x/${KERNEL_ARCHIVE}"
 
 JOBS="4"
 
-export ROCKCHIP_TPL="${WORKDIR}/rkbin/bin/rk35/rk3568_ddr_1332MHz_v1.16.bin"
-export BL31="${WORKDIR}/rkbin/bin/rk35/rk3568_bl31_v1.42.elf"
+export ROCKCHIP_TPL="${WORKDIR}/rkbin/bin/rk35/rk3568_ddr_1332MHz_v1.21.bin"
+export BL31="${WORKDIR}/rkbin/bin/rk35/rk3568_bl31_v1.44.elf"
 
 if [ ! -f "${ARCHIVE_DIR}/${UBOOT_ARCHIVE}" ]; then
     wget -O "${ARCHIVE_DIR}/${UBOOT_ARCHIVE}" "${UBOOT_SITE}"

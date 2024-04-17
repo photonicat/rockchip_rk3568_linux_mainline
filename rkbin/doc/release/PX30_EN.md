@@ -1,5 +1,55 @@
 # PX30 Release Note
 
+## px30_ddr_333MHz_v2.09.bin
+
+| Date       | file                      | Build commit | Severity |
+| ---------- | ------------------------- | ------------ | -------- |
+| 2023-12-20 | px30_ddr_333MHz_v2.09.bin | 131f35b      | moderate |
+
+### New
+
+1. Add DQS weak pull up/down.
+
+------
+
+## px30_bl31_v1.34.elf
+
+| Date       | file                | Build commit | Severity |
+| ---------- | ------------------- | ------------ | -------- |
+| 2023-12-26 | px30_bl31_v1.34.elf | 46064b2d5    | moderate |
+
+### New
+
+1. Support DDR Extended temperature range which should used with 2x, 4x refresh rate ddr bin file.
+
+------
+
+## px30_bl32_v2.15.bin
+
+| Date       | File                | Build commit | Severity  |
+| ---------- | :------------------ | ------------ | --------- |
+| 2023-08-28 | px30_bl32_v2.15.bin | b5340fd65    | important |
+
+### New
+
+1. Support pstore for optee log.
+2. Enable dynamic SHM.
+3. Support check ta encryption key is written.
+
+------
+
+## px30_{usbplug, miniloader}_v1.37.bin
+
+| Date       | file                                   | Build commit | Severity |
+| ---------- | :------------------------------------- | ------------ | -------- |
+| 2023-08-01 | px30_{usbplug, miniloader}_v1.37.bin | c949b248     | moderate |
+
+### New
+
+1. Support SLC Nand secure boot.
+
+------
+
 ## px30_bl31_v1.33.elf
 
 | Date       | file                | Build commit | Severity  |
