@@ -70,7 +70,7 @@ make O=build rockchip/rk3568-photonicat.dtb
 cp -v build/arch/arm64/boot/Image deploy/
 cp -v build/arch/arm64/boot/dts/rockchip/rk3568-photonicat.dtb deploy/
 make O=build modules_install INSTALL_MOD_PATH="${WORKDIR}/kernel/deploy/modules" INSTALL_MOD_STRIP=1
-tar --xform s:'^./':: -czf deploy/kmods.tar.gz -C "${WORKDIR}/kernel/deploy/modules" .
+tar --owner=0 --group=0 --xform s:'^./':: -czf deploy/kmods.tar.gz -C "${WORKDIR}/kernel/deploy/modules" .
 cd "${WORKDIR}"
 
 mkimage -A arm -O linux -T script -C none -a 0 -e 0 -d scripts/photonicat.bootscript deploy/boot.scr
