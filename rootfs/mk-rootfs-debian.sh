@@ -46,6 +46,7 @@ if [ ! -f "${ROOTFS_MINIMAL_ARCHIVE}" ]; then
     cp /etc/resolv.conf "${ROOTFS_MINIMAL_DIR}/etc/resolv.conf"
 
     mount --bind /dev "${ROOTFS_MINIMAL_DIR}/dev"
+    mount --bind /proc "${ROOTFS_MINIMAL_DIR}/proc"
 
     cat << EOF | chroot "${ROOTFS_MINIMAL_DIR}"
 
@@ -98,6 +99,7 @@ ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf
 EOF
 
     umount -f "${ROOTFS_MINIMAL_DIR}/dev"
+    umount -f "${ROOTFS_MINIMAL_DIR}/proc"
 
     tar --xform s:'^./':: -czpf "${ROOTFS_MINIMAL_ARCHIVE}" --xattrs -C "${ROOTFS_MINIMAL_DIR}" .
     echo "rootfs-minimal building completed."
@@ -116,6 +118,7 @@ if [ ! -f "${ROOTFS_FULL_ARCHIVE}" ]; then
     cp /etc/resolv.conf "${ROOTFS_FULL_DIR}/etc/resolv.conf"
 
     mount --bind /dev "${ROOTFS_FULL_DIR}/dev"
+    mount --bind /proc "${ROOTFS_FULL_DIR}/proc"
 
     cat << EOF | chroot "${ROOTFS_FULL_DIR}"
 
@@ -141,6 +144,7 @@ ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf
 EOF
 
     umount -f "${ROOTFS_FULL_DIR}/dev"
+    umount -f "${ROOTFS_FULL_DIR}/proc"
 
     tar --xform s:'^./':: -czpf "${ROOTFS_FULL_ARCHIVE}" --xattrs -C "${ROOTFS_FULL_DIR}" .
     echo "rootfs-full building completed."

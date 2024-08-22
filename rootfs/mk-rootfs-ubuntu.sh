@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DEB_REPO="http://mirrors.ustc.edu.cn/ubuntu-ports"
-DEB_DISTRO="jammy"
+DEB_DISTRO="noble"
 PREINSTALL_PACKAGES="nano,build-essential"
 OVERLAY_DIR="overlay-ubuntu"
 SOURCES_LIST_FILE="sources.list.ubuntu"
@@ -45,6 +45,7 @@ if [ ! -f "${ROOTFS_MINIMAL_ARCHIVE}" ]; then
     cp /etc/resolv.conf "${ROOTFS_MINIMAL_DIR}/etc/resolv.conf"
 
     mount --bind /dev "${ROOTFS_MINIMAL_DIR}/dev"
+    mount --bind /proc "${ROOTFS_MINIMAL_DIR}/proc"
 
     cat << EOF | chroot "${ROOTFS_MINIMAL_DIR}"
 
@@ -80,7 +81,7 @@ echo "ff02::2   ip6-allrouters" >>/etc/hosts
 apt-get install -fy sudo fakeroot devscripts cmake binfmt-support dh-make \
     dh-exec device-tree-compiler bc cpio parted dosfstools mtools alsa-utils \
     libssl-dev dpkg-dev isc-dhcp-client-ddns build-essential libgpiod2 \
-    libjson-c5 libusb-1.0-0 nano network-manager i2c-tools ntp git \
+    libjson-c5 libusb-1.0-0 nano network-manager i2c-tools git \
     usbutils pciutils htop openssh-server build-essential autotools-dev \
     meson libglib2.0-dev libjson-c-dev libgpiod-dev libusb-1.0-0-dev gdb \
     p7zip-full net-tools iotop wget linux-firmware
@@ -95,6 +96,7 @@ ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf
 EOF
 
     umount -f "${ROOTFS_MINIMAL_DIR}/dev"
+    umount -f "${ROOTFS_MINIMAL_DIR}/proc"
 
     tar --xform s:'^./':: -czpf "${ROOTFS_MINIMAL_ARCHIVE}" --xattrs -C "${ROOTFS_MINIMAL_DIR}" .
     echo "rootfs-minimal building completed."
@@ -113,6 +115,7 @@ if [ ! -f "${ROOTFS_FULL_ARCHIVE}" ]; then
     cp /etc/resolv.conf "${ROOTFS_FULL_DIR}/etc/resolv.conf"
 
     mount --bind /dev "${ROOTFS_FULL_DIR}/dev"
+    mount --bind /proc "${ROOTFS_FULL_DIR}/proc"
 
     cat << EOF | chroot "${ROOTFS_FULL_DIR}"
 
@@ -138,6 +141,7 @@ ln -sf ../run/NetworkManager/resolv.conf /etc/resolv.conf
 EOF
 
     umount -f "${ROOTFS_FULL_DIR}/dev"
+    umount -f "${ROOTFS_FULL_DIR}/proc"
 
     tar --xform s:'^./':: -czpf "${ROOTFS_FULL_ARCHIVE}" --xattrs -C "${ROOTFS_FULL_DIR}" .
     echo "rootfs-full building completed."
