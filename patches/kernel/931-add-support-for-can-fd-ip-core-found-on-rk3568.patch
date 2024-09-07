@@ -1,0 +1,2238 @@
+--- a/drivers/net/can/Kconfig
++++ b/drivers/net/can/Kconfig
+@@ -225,6 +225,7 @@ source "drivers/net/can/m_can/Kconfig"
+ source "drivers/net/can/mscan/Kconfig"
+ source "drivers/net/can/peak_canfd/Kconfig"
+ source "drivers/net/can/rcar/Kconfig"
++source "drivers/net/can/rockchip/Kconfig"
+ source "drivers/net/can/sja1000/Kconfig"
+ source "drivers/net/can/softing/Kconfig"
+ source "drivers/net/can/spi/Kconfig"
+
+--- a/drivers/net/can/Makefile
++++ b/drivers/net/can/Makefile
+@@ -10,6 +10,7 @@ obj-$(CONFIG_CAN_SLCAN)		+= slcan/
+ obj-y				+= dev/
+ obj-y				+= esd/
+ obj-y				+= rcar/
++obj-y				+= rockchip/
+ obj-y				+= spi/
+ obj-y				+= usb/
+ obj-y				+= softing/
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/Kconfig	2024-09-02 13:34:57.539706523 +0900
+@@ -0,0 +1,9 @@
++# SPDX-License-Identifier: GPL-2.0
++
++config CAN_ROCKCHIP_CANFD
++	tristate "Rockchip CAN-FD controller"
++	depends on OF || COMPILE_TEST
++	select CAN_RX_OFFLOAD
++	help
++	  Say Y here if you want to use CAN-FD controller found on
++	  Rockchip SoCs.
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/Makefile	2024-09-02 15:36:59.539212906 +0900
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0
++
++obj-$(CONFIG_CAN_ROCKCHIP_CANFD) += rockchip_canfd.o
++
++rockchip_canfd-objs :=
++rockchip_canfd-objs += rockchip_canfd-core.o
++rockchip_canfd-objs += rockchip_canfd-ethtool.o
++rockchip_canfd-objs += rockchip_canfd-rx.o
++rockchip_canfd-objs += rockchip_canfd-timestamp.o
++rockchip_canfd-objs += rockchip_canfd-tx.o
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c	2024-09-02 15:38:05.364337487 +0900
+@@ -0,0 +1,970 @@
++// SPDX-License-Identifier: GPL-2.0
++//
++// Copyright (c) 2023, 2024 Pengutronix,
++//               Marc Kleine-Budde <kernel@pengutronix.de>
++//
++// Based on:
++//
++// Rockchip CANFD driver
++//
++// Copyright (c) 2020 Rockchip Electronics Co. Ltd.
++//
++
++#include <linux/delay.h>
++#include <linux/errno.h>
++#include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/string.h>
++
++#include "rockchip_canfd.h"
++
++static const struct rkcanfd_devtype_data rkcanfd_devtype_data_rk3568v2 = {
++	.model = RKCANFD_MODEL_RK3568V2,
++	.quirks = RKCANFD_QUIRK_RK3568_ERRATUM_1 | RKCANFD_QUIRK_RK3568_ERRATUM_2 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_3 | RKCANFD_QUIRK_RK3568_ERRATUM_4 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_5 | RKCANFD_QUIRK_RK3568_ERRATUM_6 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_7 | RKCANFD_QUIRK_RK3568_ERRATUM_8 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_9 | RKCANFD_QUIRK_RK3568_ERRATUM_10 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_11 | RKCANFD_QUIRK_RK3568_ERRATUM_12 |
++		RKCANFD_QUIRK_CANFD_BROKEN,
++};
++
++/* The rk3568 CAN-FD errata sheet as of Tue 07 Nov 2023 11:25:31 +08:00
++ * states that only the rk3568v2 is affected by erratum 5, but tests
++ * with the rk3568v2 and rk3568v3 show that the RX_FIFO_CNT is
++ * sometimes too high. In contrast to the errata sheet mark rk3568v3
++ * as effected by erratum 5, too.
++ */
++static const struct rkcanfd_devtype_data rkcanfd_devtype_data_rk3568v3 = {
++	.model = RKCANFD_MODEL_RK3568V3,
++	.quirks = RKCANFD_QUIRK_RK3568_ERRATUM_1 | RKCANFD_QUIRK_RK3568_ERRATUM_2 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_5 | RKCANFD_QUIRK_RK3568_ERRATUM_7 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_8 | RKCANFD_QUIRK_RK3568_ERRATUM_10 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_11 | RKCANFD_QUIRK_RK3568_ERRATUM_12 |
++		RKCANFD_QUIRK_CANFD_BROKEN,
++};
++
++static const char *__rkcanfd_get_model_str(enum rkcanfd_model model)
++{
++	switch (model) {
++	case RKCANFD_MODEL_RK3568V2:
++		return "rk3568v2";
++	case RKCANFD_MODEL_RK3568V3:
++		return "rk3568v3";
++	}
++
++	return "<unknown>";
++}
++
++static inline const char *
++rkcanfd_get_model_str(const struct rkcanfd_priv *priv)
++{
++	return __rkcanfd_get_model_str(priv->devtype_data.model);
++}
++
++/* Note:
++ *
++ * The formula to calculate the CAN System Clock is:
++ *
++ * Tsclk = 2 x Tclk x (brp + 1)
++ *
++ * Double the data sheet's brp_min, brp_max and brp_inc values (both
++ * for the arbitration and data bit timing) to take the "2 x" into
++ * account.
++ */
++static const struct can_bittiming_const rkcanfd_bittiming_const = {
++	.name = DEVICE_NAME,
++	.tseg1_min = 1,
++	.tseg1_max = 256,
++	.tseg2_min = 1,
++	.tseg2_max = 128,
++	.sjw_max = 128,
++	.brp_min = 2,	/* value from data sheet x2 */
++	.brp_max = 512,	/* value from data sheet x2 */
++	.brp_inc = 2,	/* value from data sheet x2 */
++};
++
++static const struct can_bittiming_const rkcanfd_data_bittiming_const = {
++	.name = DEVICE_NAME,
++	.tseg1_min = 1,
++	.tseg1_max = 32,
++	.tseg2_min = 1,
++	.tseg2_max = 16,
++	.sjw_max = 16,
++	.brp_min = 2,	/* value from data sheet x2 */
++	.brp_max = 512,	/* value from data sheet x2 */
++	.brp_inc = 2,	/* value from data sheet x2 */
++};
++
++static void rkcanfd_chip_set_reset_mode(const struct rkcanfd_priv *priv)
++{
++	reset_control_assert(priv->reset);
++	udelay(2);
++	reset_control_deassert(priv->reset);
++
++	rkcanfd_write(priv, RKCANFD_REG_MODE, 0x0);
++}
++
++static void rkcanfd_chip_set_work_mode(const struct rkcanfd_priv *priv)
++{
++	rkcanfd_write(priv, RKCANFD_REG_MODE, priv->reg_mode_default);
++}
++
++static int rkcanfd_set_bittiming(struct rkcanfd_priv *priv)
++{
++	const struct can_bittiming *dbt = &priv->can.data_bittiming;
++	const struct can_bittiming *bt = &priv->can.bittiming;
++	u32 reg_nbt, reg_dbt, reg_tdc;
++	u32 tdco;
++
++	reg_nbt = FIELD_PREP(RKCANFD_REG_FD_NOMINAL_BITTIMING_SJW,
++			     bt->sjw - 1) |
++		FIELD_PREP(RKCANFD_REG_FD_NOMINAL_BITTIMING_BRP,
++			   (bt->brp / 2) - 1) |
++		FIELD_PREP(RKCANFD_REG_FD_NOMINAL_BITTIMING_TSEG2,
++			   bt->phase_seg2 - 1) |
++		FIELD_PREP(RKCANFD_REG_FD_NOMINAL_BITTIMING_TSEG1,
++			   bt->prop_seg + bt->phase_seg1 - 1);
++
++	rkcanfd_write(priv, RKCANFD_REG_FD_NOMINAL_BITTIMING, reg_nbt);
++
++	if (!(priv->can.ctrlmode & CAN_CTRLMODE_FD))
++		return 0;
++
++	reg_dbt = FIELD_PREP(RKCANFD_REG_FD_DATA_BITTIMING_SJW,
++			     dbt->sjw - 1) |
++		FIELD_PREP(RKCANFD_REG_FD_DATA_BITTIMING_BRP,
++			   (dbt->brp / 2) - 1) |
++		FIELD_PREP(RKCANFD_REG_FD_DATA_BITTIMING_TSEG2,
++			   dbt->phase_seg2 - 1) |
++		FIELD_PREP(RKCANFD_REG_FD_DATA_BITTIMING_TSEG1,
++			   dbt->prop_seg + dbt->phase_seg1 - 1);
++
++	rkcanfd_write(priv, RKCANFD_REG_FD_DATA_BITTIMING, reg_dbt);
++
++	tdco = (priv->can.clock.freq / dbt->bitrate) * 2 / 3;
++	tdco = min(tdco, FIELD_MAX(RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION_TDC_OFFSET));
++
++	reg_tdc = FIELD_PREP(RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION_TDC_OFFSET, tdco) |
++		RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION_TDC_ENABLE;
++	rkcanfd_write(priv, RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION,
++		      reg_tdc);
++
++	return 0;
++}
++
++static void rkcanfd_get_berr_counter_corrected(struct rkcanfd_priv *priv,
++					       struct can_berr_counter *bec)
++{
++	struct can_berr_counter bec_raw;
++	u32 reg_state;
++
++	bec->rxerr = rkcanfd_read(priv, RKCANFD_REG_RXERRORCNT);
++	bec->txerr = rkcanfd_read(priv, RKCANFD_REG_TXERRORCNT);
++	bec_raw = *bec;
++
++	/* Tests show that sometimes both CAN bus error counters read
++	 * 0x0, even if the controller is in warning mode
++	 * (RKCANFD_REG_STATE_ERROR_WARNING_STATE in RKCANFD_REG_STATE
++	 * set).
++	 *
++	 * In case both error counters read 0x0, use the struct
++	 * priv->bec, otherwise save the read value to priv->bec.
++	 *
++	 * rkcanfd_handle_rx_int_one() handles the decrementing of
++	 * priv->bec.rxerr for successfully RX'ed CAN frames.
++	 *
++	 * Luckily the controller doesn't decrement the RX CAN bus
++	 * error counter in hardware for self received TX'ed CAN
++	 * frames (RKCANFD_REG_MODE_RXSTX_MODE), so RXSTX doesn't
++	 * interfere with proper RX CAN bus error counters.
++	 *
++	 * rkcanfd_handle_tx_done_one() handles the decrementing of
++	 * priv->bec.txerr for successfully TX'ed CAN frames.
++	 */
++	if (!bec->rxerr && !bec->txerr)
++		*bec = priv->bec;
++	else
++		priv->bec = *bec;
++
++	reg_state = rkcanfd_read(priv, RKCANFD_REG_STATE);
++	netdev_vdbg(priv->ndev,
++		    "%s: Raw/Cor: txerr=%3u/%3u rxerr=%3u/%3u Bus Off=%u Warning=%u\n",
++		    __func__,
++		    bec_raw.txerr, bec->txerr, bec_raw.rxerr, bec->rxerr,
++		    !!(reg_state & RKCANFD_REG_STATE_BUS_OFF_STATE),
++		    !!(reg_state & RKCANFD_REG_STATE_ERROR_WARNING_STATE));
++}
++
++static int rkcanfd_get_berr_counter(const struct net_device *ndev,
++				    struct can_berr_counter *bec)
++{
++	struct rkcanfd_priv *priv = netdev_priv(ndev);
++	int err;
++
++	err = pm_runtime_resume_and_get(ndev->dev.parent);
++	if (err)
++		return err;
++
++	rkcanfd_get_berr_counter_corrected(priv, bec);
++
++	pm_runtime_put(ndev->dev.parent);
++
++	return 0;
++}
++
++static void rkcanfd_chip_interrupts_enable(const struct rkcanfd_priv *priv)
++{
++	rkcanfd_write(priv, RKCANFD_REG_INT_MASK, priv->reg_int_mask_default);
++
++	netdev_dbg(priv->ndev, "%s: reg_int_mask=0x%08x\n", __func__,
++		   rkcanfd_read(priv, RKCANFD_REG_INT_MASK));
++}
++
++static void rkcanfd_chip_interrupts_disable(const struct rkcanfd_priv *priv)
++{
++	rkcanfd_write(priv, RKCANFD_REG_INT_MASK, RKCANFD_REG_INT_ALL);
++}
++
++static void rkcanfd_chip_fifo_setup(struct rkcanfd_priv *priv)
++{
++	u32 reg;
++
++	/* TXE FIFO */
++	reg = rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL);
++	reg |= RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_ENABLE;
++	rkcanfd_write(priv, RKCANFD_REG_RX_FIFO_CTRL, reg);
++
++	/* RX FIFO */
++	reg = rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL);
++	reg |= RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_ENABLE;
++	rkcanfd_write(priv, RKCANFD_REG_RX_FIFO_CTRL, reg);
++
++	WRITE_ONCE(priv->tx_head, 0);
++	WRITE_ONCE(priv->tx_tail, 0);
++	netdev_reset_queue(priv->ndev);
++}
++
++static void rkcanfd_chip_start(struct rkcanfd_priv *priv)
++{
++	u32 reg;
++
++	rkcanfd_chip_set_reset_mode(priv);
++
++	/* Receiving Filter: accept all */
++	rkcanfd_write(priv, RKCANFD_REG_IDCODE, 0x0);
++	rkcanfd_write(priv, RKCANFD_REG_IDMASK, RKCANFD_REG_IDCODE_EXTENDED_FRAME_ID);
++
++	/* enable:
++	 * - CAN_FD: enable CAN-FD
++	 * - AUTO_RETX_MODE: auto retransmission on TX error
++	 * - COVER_MODE: RX-FIFO overwrite mode, do not send OVERLOAD frames
++	 * - RXSTX_MODE: Receive Self Transmit data mode
++	 * - WORK_MODE: transition from reset to working mode
++	 */
++	reg = rkcanfd_read(priv, RKCANFD_REG_MODE);
++	priv->reg_mode_default = reg |
++		RKCANFD_REG_MODE_CAN_FD_MODE_ENABLE |
++		RKCANFD_REG_MODE_AUTO_RETX_MODE |
++		RKCANFD_REG_MODE_COVER_MODE |
++		RKCANFD_REG_MODE_RXSTX_MODE |
++		RKCANFD_REG_MODE_WORK_MODE;
++
++	if (priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK)
++		priv->reg_mode_default |= RKCANFD_REG_MODE_LBACK_MODE |
++			RKCANFD_REG_MODE_SILENT_MODE |
++			RKCANFD_REG_MODE_SELF_TEST;
++
++	/* mask, i.e. ignore:
++	 * - TIMESTAMP_COUNTER_OVERFLOW_INT - timestamp counter overflow interrupt
++	 * - TX_ARBIT_FAIL_INT - TX arbitration fail interrupt
++	 * - OVERLOAD_INT - CAN bus overload interrupt
++	 * - TX_FINISH_INT - Transmit finish interrupt
++	 */
++	priv->reg_int_mask_default =
++		RKCANFD_REG_INT_TIMESTAMP_COUNTER_OVERFLOW_INT |
++		RKCANFD_REG_INT_TX_ARBIT_FAIL_INT |
++		RKCANFD_REG_INT_OVERLOAD_INT |
++		RKCANFD_REG_INT_TX_FINISH_INT;
++
++	/* Do not mask the bus error interrupt if the bus error
++	 * reporting is requested.
++	 */
++	if (!(priv->can.ctrlmode & CAN_CTRLMODE_BERR_REPORTING))
++		priv->reg_int_mask_default |= RKCANFD_REG_INT_ERROR_INT;
++
++	memset(&priv->bec, 0x0, sizeof(priv->bec));
++
++	rkcanfd_chip_fifo_setup(priv);
++	rkcanfd_timestamp_init(priv);
++	rkcanfd_timestamp_start(priv);
++
++	rkcanfd_set_bittiming(priv);
++
++	rkcanfd_chip_interrupts_disable(priv);
++	rkcanfd_chip_set_work_mode(priv);
++
++	priv->can.state = CAN_STATE_ERROR_ACTIVE;
++
++	netdev_dbg(priv->ndev, "%s: reg_mode=0x%08x\n", __func__,
++		   rkcanfd_read(priv, RKCANFD_REG_MODE));
++}
++
++static void __rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state state)
++{
++	priv->can.state = state;
++
++	rkcanfd_chip_set_reset_mode(priv);
++	rkcanfd_chip_interrupts_disable(priv);
++}
++
++static void rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state state)
++{
++	priv->can.state = state;
++
++	rkcanfd_timestamp_stop(priv);
++	__rkcanfd_chip_stop(priv, state);
++}
++
++static void rkcanfd_chip_stop_sync(struct rkcanfd_priv *priv, const enum can_state state)
++{
++	priv->can.state = state;
++
++	rkcanfd_timestamp_stop_sync(priv);
++	__rkcanfd_chip_stop(priv, state);
++}
++
++static int rkcanfd_set_mode(struct net_device *ndev,
++			    enum can_mode mode)
++{
++	struct rkcanfd_priv *priv = netdev_priv(ndev);
++
++	switch (mode) {
++	case CAN_MODE_START:
++		rkcanfd_chip_start(priv);
++		rkcanfd_chip_interrupts_enable(priv);
++		netif_wake_queue(ndev);
++		break;
++
++	default:
++		return -EOPNOTSUPP;
++	}
++
++	return 0;
++}
++
++static struct sk_buff *
++rkcanfd_alloc_can_err_skb(struct rkcanfd_priv *priv,
++			  struct can_frame **cf, u32 *timestamp)
++{
++	struct sk_buff *skb;
++
++	*timestamp = rkcanfd_get_timestamp(priv);
++
++	skb = alloc_can_err_skb(priv->ndev, cf);
++	if (skb)
++		rkcanfd_skb_set_timestamp(priv, skb, *timestamp);
++
++	return skb;
++}
++
++static const char *rkcanfd_get_error_type_str(unsigned int type)
++{
++	switch (type) {
++	case RKCANFD_REG_ERROR_CODE_TYPE_BIT:
++		return "Bit";
++	case RKCANFD_REG_ERROR_CODE_TYPE_STUFF:
++		return "Stuff";
++	case RKCANFD_REG_ERROR_CODE_TYPE_FORM:
++		return "Form";
++	case RKCANFD_REG_ERROR_CODE_TYPE_ACK:
++		return "ACK";
++	case RKCANFD_REG_ERROR_CODE_TYPE_CRC:
++		return "CRC";
++	}
++
++	return "<unknown>";
++}
++
++#define RKCAN_ERROR_CODE(reg_ec, code) \
++	((reg_ec) & RKCANFD_REG_ERROR_CODE_##code ? __stringify(code) " " : "")
++
++static void
++rkcanfd_handle_error_int_reg_ec(struct rkcanfd_priv *priv, struct can_frame *cf,
++				const u32 reg_ec)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	unsigned int type;
++	u32 reg_state, reg_cmd;
++
++	type = FIELD_GET(RKCANFD_REG_ERROR_CODE_TYPE, reg_ec);
++	reg_cmd = rkcanfd_read(priv, RKCANFD_REG_CMD);
++	reg_state = rkcanfd_read(priv, RKCANFD_REG_STATE);
++
++	netdev_dbg(priv->ndev, "%s Error in %s %s Phase: %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s(0x%08x) CMD=%u RX=%u TX=%u Error-Warning=%u Bus-Off=%u\n",
++		   rkcanfd_get_error_type_str(type),
++		   reg_ec & RKCANFD_REG_ERROR_CODE_DIRECTION_RX ? "RX" : "TX",
++		   reg_ec & RKCANFD_REG_ERROR_CODE_PHASE ? "Data" : "Arbitration",
++		   RKCAN_ERROR_CODE(reg_ec, TX_OVERLOAD),
++		   RKCAN_ERROR_CODE(reg_ec, TX_ERROR),
++		   RKCAN_ERROR_CODE(reg_ec, TX_ACK),
++		   RKCAN_ERROR_CODE(reg_ec, TX_ACK_EOF),
++		   RKCAN_ERROR_CODE(reg_ec, TX_CRC),
++		   RKCAN_ERROR_CODE(reg_ec, TX_STUFF_COUNT),
++		   RKCAN_ERROR_CODE(reg_ec, TX_DATA),
++		   RKCAN_ERROR_CODE(reg_ec, TX_SOF_DLC),
++		   RKCAN_ERROR_CODE(reg_ec, TX_IDLE),
++		   RKCAN_ERROR_CODE(reg_ec, RX_BUF_INT),
++		   RKCAN_ERROR_CODE(reg_ec, RX_SPACE),
++		   RKCAN_ERROR_CODE(reg_ec, RX_EOF),
++		   RKCAN_ERROR_CODE(reg_ec, RX_ACK_LIM),
++		   RKCAN_ERROR_CODE(reg_ec, RX_ACK),
++		   RKCAN_ERROR_CODE(reg_ec, RX_CRC_LIM),
++		   RKCAN_ERROR_CODE(reg_ec, RX_CRC),
++		   RKCAN_ERROR_CODE(reg_ec, RX_STUFF_COUNT),
++		   RKCAN_ERROR_CODE(reg_ec, RX_DATA),
++		   RKCAN_ERROR_CODE(reg_ec, RX_DLC),
++		   RKCAN_ERROR_CODE(reg_ec, RX_BRS_ESI),
++		   RKCAN_ERROR_CODE(reg_ec, RX_RES),
++		   RKCAN_ERROR_CODE(reg_ec, RX_FDF),
++		   RKCAN_ERROR_CODE(reg_ec, RX_ID2_RTR),
++		   RKCAN_ERROR_CODE(reg_ec, RX_SOF_IDE),
++		   RKCAN_ERROR_CODE(reg_ec, RX_IDLE),
++		   reg_ec, reg_cmd,
++		   !!(reg_state & RKCANFD_REG_STATE_RX_PERIOD),
++		   !!(reg_state & RKCANFD_REG_STATE_TX_PERIOD),
++		   !!(reg_state & RKCANFD_REG_STATE_ERROR_WARNING_STATE),
++		   !!(reg_state & RKCANFD_REG_STATE_BUS_OFF_STATE));
++
++	priv->can.can_stats.bus_error++;
++
++	if (reg_ec & RKCANFD_REG_ERROR_CODE_DIRECTION_RX)
++		stats->rx_errors++;
++	else
++		stats->tx_errors++;
++
++	if (!cf)
++		return;
++
++	if (reg_ec & RKCANFD_REG_ERROR_CODE_DIRECTION_RX) {
++		if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_SOF_IDE)
++			cf->data[3] = CAN_ERR_PROT_LOC_SOF;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_ID2_RTR)
++			cf->data[3] = CAN_ERR_PROT_LOC_RTR;
++		/* RKCANFD_REG_ERROR_CODE_RX_FDF */
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_RES)
++			cf->data[3] = CAN_ERR_PROT_LOC_RES0;
++		/* RKCANFD_REG_ERROR_CODE_RX_BRS_ESI */
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_DLC)
++			cf->data[3] = CAN_ERR_PROT_LOC_DLC;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_DATA)
++			cf->data[3] = CAN_ERR_PROT_LOC_DATA;
++		/* RKCANFD_REG_ERROR_CODE_RX_STUFF_COUNT */
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_CRC)
++			cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_CRC_LIM)
++			cf->data[3] = CAN_ERR_PROT_LOC_ACK_DEL;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_ACK)
++			cf->data[3] = CAN_ERR_PROT_LOC_ACK;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_ACK_LIM)
++			cf->data[3] = CAN_ERR_PROT_LOC_ACK_DEL;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_EOF)
++			cf->data[3] = CAN_ERR_PROT_LOC_EOF;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_SPACE)
++			cf->data[3] = CAN_ERR_PROT_LOC_EOF;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_RX_BUF_INT)
++			cf->data[3] = CAN_ERR_PROT_LOC_INTERM;
++	} else {
++		cf->data[2] |= CAN_ERR_PROT_TX;
++
++		if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_SOF_DLC)
++			cf->data[3] = CAN_ERR_PROT_LOC_SOF;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_DATA)
++			cf->data[3] = CAN_ERR_PROT_LOC_DATA;
++		/* RKCANFD_REG_ERROR_CODE_TX_STUFF_COUNT */
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_CRC)
++			cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_ACK_EOF)
++			cf->data[3] = CAN_ERR_PROT_LOC_ACK;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_ACK)
++			cf->data[3] = CAN_ERR_PROT_LOC_ACK;
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_ACK_EOF)
++			cf->data[3] = CAN_ERR_PROT_LOC_ACK_DEL;
++		/* RKCANFD_REG_ERROR_CODE_TX_ERROR */
++		else if (reg_ec & RKCANFD_REG_ERROR_CODE_TX_OVERLOAD)
++			cf->data[2] |= CAN_ERR_PROT_OVERLOAD;
++	}
++
++	switch (reg_ec & RKCANFD_REG_ERROR_CODE_TYPE) {
++	case FIELD_PREP_CONST(RKCANFD_REG_ERROR_CODE_TYPE,
++			      RKCANFD_REG_ERROR_CODE_TYPE_BIT):
++
++		cf->data[2] |= CAN_ERR_PROT_BIT;
++		break;
++	case FIELD_PREP_CONST(RKCANFD_REG_ERROR_CODE_TYPE,
++			      RKCANFD_REG_ERROR_CODE_TYPE_STUFF):
++		cf->data[2] |= CAN_ERR_PROT_STUFF;
++		break;
++	case FIELD_PREP_CONST(RKCANFD_REG_ERROR_CODE_TYPE,
++			      RKCANFD_REG_ERROR_CODE_TYPE_FORM):
++		cf->data[2] |= CAN_ERR_PROT_FORM;
++		break;
++	case FIELD_PREP_CONST(RKCANFD_REG_ERROR_CODE_TYPE,
++			      RKCANFD_REG_ERROR_CODE_TYPE_ACK):
++		cf->can_id |= CAN_ERR_ACK;
++		break;
++	case FIELD_PREP_CONST(RKCANFD_REG_ERROR_CODE_TYPE,
++			      RKCANFD_REG_ERROR_CODE_TYPE_CRC):
++		cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
++		break;
++	}
++}
++
++static int rkcanfd_handle_error_int(struct rkcanfd_priv *priv)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	struct can_frame *cf = NULL;
++	u32 reg_ec, timestamp;
++	struct sk_buff *skb;
++	int err;
++
++	reg_ec = rkcanfd_read(priv, RKCANFD_REG_ERROR_CODE);
++
++	if (!reg_ec)
++		return 0;
++
++	if (priv->can.ctrlmode & CAN_CTRLMODE_BERR_REPORTING) {
++		skb = rkcanfd_alloc_can_err_skb(priv, &cf, &timestamp);
++		if (cf) {
++			struct can_berr_counter bec;
++
++			rkcanfd_get_berr_counter_corrected(priv, &bec);
++			cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR | CAN_ERR_CNT;
++			cf->data[6] = bec.txerr;
++			cf->data[7] = bec.rxerr;
++		}
++	}
++
++	rkcanfd_handle_error_int_reg_ec(priv, cf, reg_ec);
++
++	if (!cf)
++		return 0;
++
++	err = can_rx_offload_queue_timestamp(&priv->offload, skb, timestamp);
++	if (err)
++		stats->rx_fifo_errors++;
++
++	return 0;
++}
++
++static int rkcanfd_handle_state_error_int(struct rkcanfd_priv *priv)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	enum can_state new_state, rx_state, tx_state;
++	struct net_device *ndev = priv->ndev;
++	struct can_berr_counter bec;
++	struct can_frame *cf = NULL;
++	struct sk_buff *skb;
++	u32 timestamp;
++	int err;
++
++	rkcanfd_get_berr_counter_corrected(priv, &bec);
++	can_state_get_by_berr_counter(ndev, &bec, &tx_state, &rx_state);
++
++	new_state = max(tx_state, rx_state);
++	if (new_state == priv->can.state)
++		return 0;
++
++	/* The skb allocation might fail, but can_change_state()
++	 * handles cf == NULL.
++	 */
++	skb = rkcanfd_alloc_can_err_skb(priv, &cf, &timestamp);
++	can_change_state(ndev, cf, tx_state, rx_state);
++
++	if (new_state == CAN_STATE_BUS_OFF) {
++		rkcanfd_chip_stop(priv, CAN_STATE_BUS_OFF);
++		can_bus_off(ndev);
++	}
++
++	if (!skb)
++		return 0;
++
++	if (new_state != CAN_STATE_BUS_OFF) {
++		cf->can_id |= CAN_ERR_CNT;
++		cf->data[6] = bec.txerr;
++		cf->data[7] = bec.rxerr;
++	}
++
++	err = can_rx_offload_queue_timestamp(&priv->offload, skb, timestamp);
++	if (err)
++		stats->rx_fifo_errors++;
++
++	return 0;
++}
++
++static int
++rkcanfd_handle_rx_fifo_overflow_int(struct rkcanfd_priv *priv)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	struct can_berr_counter bec;
++	struct can_frame *cf = NULL;
++	struct sk_buff *skb;
++	u32 timestamp;
++	int err;
++
++	stats->rx_over_errors++;
++	stats->rx_errors++;
++
++	netdev_dbg(priv->ndev, "RX-FIFO overflow\n");
++
++	skb = rkcanfd_alloc_can_err_skb(priv, &cf, &timestamp);
++	if (skb)
++		return 0;
++
++	rkcanfd_get_berr_counter_corrected(priv, &bec);
++
++	cf->can_id |= CAN_ERR_CRTL | CAN_ERR_CNT;
++	cf->data[1] = CAN_ERR_CRTL_RX_OVERFLOW;
++	cf->data[6] = bec.txerr;
++	cf->data[7] = bec.rxerr;
++
++	err = can_rx_offload_queue_timestamp(&priv->offload, skb, timestamp);
++	if (err)
++		stats->rx_fifo_errors++;
++
++	return 0;
++}
++
++#define rkcanfd_handle(priv, irq, ...) \
++({ \
++	struct rkcanfd_priv *_priv = (priv); \
++	int err; \
++\
++	err = rkcanfd_handle_##irq(_priv, ## __VA_ARGS__); \
++	if (err) \
++		netdev_err(_priv->ndev, \
++			"IRQ handler rkcanfd_handle_%s() returned error: %pe\n", \
++			   __stringify(irq), ERR_PTR(err)); \
++	err; \
++})
++
++static irqreturn_t rkcanfd_irq(int irq, void *dev_id)
++{
++	struct rkcanfd_priv *priv = dev_id;
++	u32 reg_int_unmasked, reg_int;
++
++	reg_int_unmasked = rkcanfd_read(priv, RKCANFD_REG_INT);
++	reg_int = reg_int_unmasked & ~priv->reg_int_mask_default;
++
++	if (!reg_int)
++		return IRQ_NONE;
++
++	/* First ACK then handle, to avoid lost-IRQ race condition on
++	 * fast re-occurring interrupts.
++	 */
++	rkcanfd_write(priv, RKCANFD_REG_INT, reg_int);
++
++	if (reg_int & RKCANFD_REG_INT_RX_FINISH_INT)
++		rkcanfd_handle(priv, rx_int);
++
++	if (reg_int & RKCANFD_REG_INT_ERROR_INT)
++		rkcanfd_handle(priv, error_int);
++
++	if (reg_int & (RKCANFD_REG_INT_BUS_OFF_INT |
++		       RKCANFD_REG_INT_PASSIVE_ERROR_INT |
++		       RKCANFD_REG_INT_ERROR_WARNING_INT) ||
++	    priv->can.state > CAN_STATE_ERROR_ACTIVE)
++		rkcanfd_handle(priv, state_error_int);
++
++	if (reg_int & RKCANFD_REG_INT_RX_FIFO_OVERFLOW_INT)
++		rkcanfd_handle(priv, rx_fifo_overflow_int);
++
++	if (reg_int & ~(RKCANFD_REG_INT_ALL_ERROR |
++			RKCANFD_REG_INT_RX_FIFO_OVERFLOW_INT |
++			RKCANFD_REG_INT_RX_FINISH_INT))
++		netdev_err(priv->ndev, "%s: int=0x%08x\n", __func__, reg_int);
++
++	if (reg_int & RKCANFD_REG_INT_WAKEUP_INT)
++		netdev_info(priv->ndev, "%s: WAKEUP_INT\n", __func__);
++
++	if (reg_int & RKCANFD_REG_INT_TXE_FIFO_FULL_INT)
++		netdev_info(priv->ndev, "%s: TXE_FIFO_FULL_INT\n", __func__);
++
++	if (reg_int & RKCANFD_REG_INT_TXE_FIFO_OV_INT)
++		netdev_info(priv->ndev, "%s: TXE_FIFO_OV_INT\n", __func__);
++
++	if (reg_int & RKCANFD_REG_INT_BUS_OFF_RECOVERY_INT)
++		netdev_info(priv->ndev, "%s: BUS_OFF_RECOVERY_INT\n", __func__);
++
++	if (reg_int & RKCANFD_REG_INT_RX_FIFO_FULL_INT)
++		netdev_info(priv->ndev, "%s: RX_FIFO_FULL_INT\n", __func__);
++
++	if (reg_int & RKCANFD_REG_INT_OVERLOAD_INT)
++		netdev_info(priv->ndev, "%s: OVERLOAD_INT\n", __func__);
++
++	can_rx_offload_irq_finish(&priv->offload);
++
++	return IRQ_HANDLED;
++}
++
++static int rkcanfd_open(struct net_device *ndev)
++{
++	struct rkcanfd_priv *priv = netdev_priv(ndev);
++	int err;
++
++	err = open_candev(ndev);
++	if (err)
++		return err;
++
++	err = pm_runtime_resume_and_get(ndev->dev.parent);
++	if (err)
++		goto out_close_candev;
++
++	rkcanfd_chip_start(priv);
++	can_rx_offload_enable(&priv->offload);
++
++	err = request_irq(ndev->irq, rkcanfd_irq, IRQF_SHARED, ndev->name, priv);
++	if (err)
++		goto out_rkcanfd_chip_stop;
++
++	rkcanfd_chip_interrupts_enable(priv);
++
++	netif_start_queue(ndev);
++
++	return 0;
++
++out_rkcanfd_chip_stop:
++	rkcanfd_chip_stop_sync(priv, CAN_STATE_STOPPED);
++	pm_runtime_put(ndev->dev.parent);
++out_close_candev:
++	close_candev(ndev);
++	return err;
++}
++
++static int rkcanfd_stop(struct net_device *ndev)
++{
++	struct rkcanfd_priv *priv = netdev_priv(ndev);
++
++	netif_stop_queue(ndev);
++
++	rkcanfd_chip_interrupts_disable(priv);
++	free_irq(ndev->irq, priv);
++	can_rx_offload_disable(&priv->offload);
++	rkcanfd_chip_stop_sync(priv, CAN_STATE_STOPPED);
++	close_candev(ndev);
++
++	pm_runtime_put(ndev->dev.parent);
++
++	return 0;
++}
++
++static const struct net_device_ops rkcanfd_netdev_ops = {
++	.ndo_open = rkcanfd_open,
++	.ndo_stop = rkcanfd_stop,
++	.ndo_start_xmit = rkcanfd_start_xmit,
++	.ndo_change_mtu = can_change_mtu,
++};
++
++static int __maybe_unused rkcanfd_runtime_suspend(struct device *dev)
++{
++	struct rkcanfd_priv *priv = dev_get_drvdata(dev);
++
++	clk_bulk_disable_unprepare(priv->clks_num, priv->clks);
++
++	return 0;
++}
++
++static int __maybe_unused rkcanfd_runtime_resume(struct device *dev)
++{
++	struct rkcanfd_priv *priv = dev_get_drvdata(dev);
++
++	return clk_bulk_prepare_enable(priv->clks_num, priv->clks);
++}
++
++static void rkcanfd_register_done(const struct rkcanfd_priv *priv)
++{
++	u32 dev_id;
++
++	dev_id = rkcanfd_read(priv, RKCANFD_REG_RTL_VERSION);
++
++	netdev_info(priv->ndev,
++		    "Rockchip-CANFD %s rev%lu.%lu (errata 0x%04x) found\n",
++		    rkcanfd_get_model_str(priv),
++		    FIELD_GET(RKCANFD_REG_RTL_VERSION_MAJOR, dev_id),
++		    FIELD_GET(RKCANFD_REG_RTL_VERSION_MINOR, dev_id),
++		    priv->devtype_data.quirks);
++
++	if (priv->devtype_data.quirks & RKCANFD_QUIRK_RK3568_ERRATUM_5 &&
++	    priv->can.clock.freq < RKCANFD_ERRATUM_5_SYSCLOCK_HZ_MIN)
++		netdev_info(priv->ndev,
++			    "Erratum 5: CAN clock frequency (%luMHz) lower than known good (%luMHz), expect degraded performance\n",
++			    priv->can.clock.freq / MEGA,
++			    RKCANFD_ERRATUM_5_SYSCLOCK_HZ_MIN / MEGA);
++}
++
++static int rkcanfd_register(struct rkcanfd_priv *priv)
++{
++	struct net_device *ndev = priv->ndev;
++	int err;
++
++	pm_runtime_enable(ndev->dev.parent);
++
++	err = pm_runtime_resume_and_get(ndev->dev.parent);
++	if (err)
++		goto out_pm_runtime_disable;
++
++	rkcanfd_ethtool_init(priv);
++
++	err = register_candev(ndev);
++	if (err)
++		goto out_pm_runtime_put_sync;
++
++	rkcanfd_register_done(priv);
++
++	pm_runtime_put(ndev->dev.parent);
++
++	return 0;
++
++out_pm_runtime_put_sync:
++	pm_runtime_put_sync(ndev->dev.parent);
++out_pm_runtime_disable:
++	pm_runtime_disable(ndev->dev.parent);
++
++	return err;
++}
++
++static inline void rkcanfd_unregister(struct rkcanfd_priv *priv)
++{
++	struct net_device *ndev	= priv->ndev;
++
++	unregister_candev(ndev);
++	pm_runtime_disable(ndev->dev.parent);
++}
++
++static const struct of_device_id rkcanfd_of_match[] = {
++	{
++		.compatible = "rockchip,rk3568v2-canfd",
++		.data = &rkcanfd_devtype_data_rk3568v2,
++	}, {
++		.compatible = "rockchip,rk3568v3-canfd",
++		.data = &rkcanfd_devtype_data_rk3568v3,
++	}, {
++		/* sentinel */
++	},
++};
++MODULE_DEVICE_TABLE(of, rkcanfd_of_match);
++
++static int rkcanfd_probe(struct platform_device *pdev)
++{
++	struct rkcanfd_priv *priv;
++	struct net_device *ndev;
++	const void *match;
++	int err;
++
++	ndev = alloc_candev(sizeof(struct rkcanfd_priv), RKCANFD_TXFIFO_DEPTH);
++	if (!ndev)
++		return -ENOMEM;
++
++	priv = netdev_priv(ndev);
++
++	ndev->irq = platform_get_irq(pdev, 0);
++	if (ndev->irq < 0) {
++		err = ndev->irq;
++		goto out_free_candev;
++	}
++
++	priv->clks_num = devm_clk_bulk_get_all(&pdev->dev, &priv->clks);
++	if (priv->clks_num < 0) {
++		err = priv->clks_num;
++		goto out_free_candev;
++	}
++
++	priv->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(priv->regs)) {
++		err = PTR_ERR(priv->regs);
++		goto out_free_candev;
++	}
++
++	priv->reset = devm_reset_control_array_get_exclusive(&pdev->dev);
++	if (IS_ERR(priv->reset)) {
++		err = dev_err_probe(&pdev->dev, PTR_ERR(priv->reset),
++				    "Failed to get reset line\n");
++		goto out_free_candev;
++	}
++
++	SET_NETDEV_DEV(ndev, &pdev->dev);
++
++	ndev->netdev_ops = &rkcanfd_netdev_ops;
++	ndev->flags |= IFF_ECHO;
++
++	platform_set_drvdata(pdev, priv);
++	priv->can.clock.freq = clk_get_rate(priv->clks[0].clk);
++	priv->can.bittiming_const = &rkcanfd_bittiming_const;
++	priv->can.data_bittiming_const = &rkcanfd_data_bittiming_const;
++	priv->can.ctrlmode_supported = CAN_CTRLMODE_LOOPBACK;
++	if (!(priv->devtype_data.quirks & RKCANFD_QUIRK_CANFD_BROKEN))
++		priv->can.ctrlmode_supported |= CAN_CTRLMODE_FD;
++	priv->can.do_set_mode = rkcanfd_set_mode;
++	priv->can.do_get_berr_counter = rkcanfd_get_berr_counter;
++	priv->ndev = ndev;
++
++	match = device_get_match_data(&pdev->dev);
++	if (match)
++		priv->devtype_data = *(struct rkcanfd_devtype_data *)match;
++
++	err = can_rx_offload_add_manual(ndev, &priv->offload,
++					RKCANFD_NAPI_WEIGHT);
++	if (err)
++		goto out_free_candev;
++
++	err = rkcanfd_register(priv);
++	if (err)
++		goto out_can_rx_offload_del;
++
++	return 0;
++
++out_can_rx_offload_del:
++	can_rx_offload_del(&priv->offload);
++out_free_candev:
++	free_candev(ndev);
++
++	return err;
++}
++
++static int rkcanfd_remove(struct platform_device *pdev)
++{
++	struct rkcanfd_priv *priv = platform_get_drvdata(pdev);
++	struct net_device *ndev = priv->ndev;
++
++	can_rx_offload_del(&priv->offload);
++	rkcanfd_unregister(priv);
++	free_candev(ndev);
++
++	return 0;
++}
++
++static const struct dev_pm_ops rkcanfd_pm_ops = {
++	SET_RUNTIME_PM_OPS(rkcanfd_runtime_suspend,
++			   rkcanfd_runtime_resume, NULL)
++};
++
++static struct platform_driver rkcanfd_driver = {
++	.driver = {
++		.name = DEVICE_NAME,
++		.pm = &rkcanfd_pm_ops,
++		.of_match_table = rkcanfd_of_match,
++	},
++	.probe = rkcanfd_probe,
++	.remove = rkcanfd_remove,
++};
++module_platform_driver(rkcanfd_driver);
++
++MODULE_AUTHOR("Marc Kleine-Budde <mkl@pengutronix.de>");
++MODULE_DESCRIPTION("Rockchip CAN-FD Driver");
++MODULE_LICENSE("GPL");
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/rockchip_canfd-ethtool.c	2024-09-02 15:37:52.132111695 +0900
+@@ -0,0 +1,73 @@
++// SPDX-License-Identifier: GPL-2.0
++//
++// Copyright (c) 2023, 2024 Pengutronix,
++//               Marc Kleine-Budde <kernel@pengutronix.de>
++//
++
++#include <linux/ethtool.h>
++
++#include "rockchip_canfd.h"
++
++enum rkcanfd_stats_type {
++	RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS,
++	RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS,
++};
++
++static const char rkcanfd_stats_strings[][ETH_GSTRING_LEN] = {
++	[RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS] = "rx_fifo_empty_errors",
++	[RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS] = "tx_extended_as_standard_errors",
++};
++
++static void
++rkcanfd_ethtool_get_strings(struct net_device *ndev, u32 stringset, u8 *buf)
++{
++	switch (stringset) {
++	case ETH_SS_STATS:
++		memcpy(buf, rkcanfd_stats_strings,
++		       sizeof(rkcanfd_stats_strings));
++	}
++}
++
++static int rkcanfd_ethtool_get_sset_count(struct net_device *netdev, int sset)
++{
++	switch (sset) {
++	case ETH_SS_STATS:
++		return ARRAY_SIZE(rkcanfd_stats_strings);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static void
++rkcanfd_ethtool_get_ethtool_stats(struct net_device *ndev,
++				  struct ethtool_stats *stats, u64 *data)
++{
++	struct rkcanfd_priv *priv = netdev_priv(ndev);
++	struct rkcanfd_stats *rkcanfd_stats;
++	unsigned int start;
++
++	rkcanfd_stats = &priv->stats;
++
++	do {
++		start = u64_stats_fetch_begin(&rkcanfd_stats->syncp);
++
++		data[RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS] =
++			u64_stats_read(&rkcanfd_stats->rx_fifo_empty_errors);
++		data[RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS] =
++			u64_stats_read(&rkcanfd_stats->tx_extended_as_standard_errors);
++	} while (u64_stats_fetch_retry(&rkcanfd_stats->syncp, start));
++}
++
++static const struct ethtool_ops rkcanfd_ethtool_ops = {
++	.get_ts_info = can_ethtool_op_get_ts_info_hwts,
++	.get_strings = rkcanfd_ethtool_get_strings,
++	.get_sset_count = rkcanfd_ethtool_get_sset_count,
++	.get_ethtool_stats = rkcanfd_ethtool_get_ethtool_stats,
++};
++
++void rkcanfd_ethtool_init(struct rkcanfd_priv *priv)
++{
++	priv->ndev->ethtool_ops = &rkcanfd_ethtool_ops;
++
++	u64_stats_init(&priv->stats.syncp);
++}
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/rockchip_canfd.h	2024-09-02 15:37:52.132111695 +0900
+@@ -0,0 +1,553 @@
++/* SPDX-License-Identifier: GPL-2.0
++ *
++ * Copyright (c) 2023, 2024 Pengutronix,
++ *               Marc Kleine-Budde <kernel@pengutronix.de>
++ */
++
++#ifndef _ROCKCHIP_CANFD_H
++#define _ROCKCHIP_CANFD_H
++
++#include <linux/bitfield.h>
++#include <linux/can/dev.h>
++#include <linux/can/rx-offload.h>
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/netdevice.h>
++#include <linux/reset.h>
++#include <linux/skbuff.h>
++#include <linux/timecounter.h>
++#include <linux/types.h>
++#include <linux/u64_stats_sync.h>
++#include <linux/units.h>
++
++#define RKCANFD_REG_MODE 0x000
++#define RKCANFD_REG_MODE_CAN_FD_MODE_ENABLE BIT(15)
++#define RKCANFD_REG_MODE_DPEE BIT(14)
++#define RKCANFD_REG_MODE_BRSD BIT(13)
++#define RKCANFD_REG_MODE_SPACE_RX_MODE BIT(12)
++#define RKCANFD_REG_MODE_AUTO_BUS_ON BIT(11)
++#define RKCANFD_REG_MODE_AUTO_RETX_MODE BIT(10)
++#define RKCANFD_REG_MODE_OVLD_MODE BIT(9)
++#define RKCANFD_REG_MODE_COVER_MODE BIT(8)
++#define RKCANFD_REG_MODE_RXSORT_MODE BIT(7)
++#define RKCANFD_REG_MODE_TXORDER_MODE BIT(6)
++#define RKCANFD_REG_MODE_RXSTX_MODE BIT(5)
++#define RKCANFD_REG_MODE_LBACK_MODE BIT(4)
++#define RKCANFD_REG_MODE_SILENT_MODE BIT(3)
++#define RKCANFD_REG_MODE_SELF_TEST BIT(2)
++#define RKCANFD_REG_MODE_SLEEP_MODE BIT(1)
++#define RKCANFD_REG_MODE_WORK_MODE BIT(0)
++
++#define RKCANFD_REG_CMD 0x004
++#define RKCANFD_REG_CMD_TX1_REQ BIT(1)
++#define RKCANFD_REG_CMD_TX0_REQ BIT(0)
++#define RKCANFD_REG_CMD_TX_REQ(i) (RKCANFD_REG_CMD_TX0_REQ << (i))
++
++#define RKCANFD_REG_STATE 0x008
++#define RKCANFD_REG_STATE_SLEEP_STATE BIT(6)
++#define RKCANFD_REG_STATE_BUS_OFF_STATE BIT(5)
++#define RKCANFD_REG_STATE_ERROR_WARNING_STATE BIT(4)
++#define RKCANFD_REG_STATE_TX_PERIOD BIT(3)
++#define RKCANFD_REG_STATE_RX_PERIOD BIT(2)
++#define RKCANFD_REG_STATE_TX_BUFFER_FULL BIT(1)
++#define RKCANFD_REG_STATE_RX_BUFFER_FULL BIT(0)
++
++#define RKCANFD_REG_INT 0x00c
++#define RKCANFD_REG_INT_WAKEUP_INT BIT(14)
++#define RKCANFD_REG_INT_TXE_FIFO_FULL_INT BIT(13)
++#define RKCANFD_REG_INT_TXE_FIFO_OV_INT BIT(12)
++#define RKCANFD_REG_INT_TIMESTAMP_COUNTER_OVERFLOW_INT BIT(11)
++#define RKCANFD_REG_INT_BUS_OFF_RECOVERY_INT BIT(10)
++#define RKCANFD_REG_INT_BUS_OFF_INT BIT(9)
++#define RKCANFD_REG_INT_RX_FIFO_OVERFLOW_INT BIT(8)
++#define RKCANFD_REG_INT_RX_FIFO_FULL_INT BIT(7)
++#define RKCANFD_REG_INT_ERROR_INT BIT(6)
++#define RKCANFD_REG_INT_TX_ARBIT_FAIL_INT BIT(5)
++#define RKCANFD_REG_INT_PASSIVE_ERROR_INT BIT(4)
++#define RKCANFD_REG_INT_OVERLOAD_INT BIT(3)
++#define RKCANFD_REG_INT_ERROR_WARNING_INT BIT(2)
++#define RKCANFD_REG_INT_TX_FINISH_INT BIT(1)
++#define RKCANFD_REG_INT_RX_FINISH_INT BIT(0)
++
++#define RKCANFD_REG_INT_ALL \
++	(RKCANFD_REG_INT_WAKEUP_INT | \
++	 RKCANFD_REG_INT_TXE_FIFO_FULL_INT | \
++	 RKCANFD_REG_INT_TXE_FIFO_OV_INT | \
++	 RKCANFD_REG_INT_TIMESTAMP_COUNTER_OVERFLOW_INT | \
++	 RKCANFD_REG_INT_BUS_OFF_RECOVERY_INT | \
++	 RKCANFD_REG_INT_BUS_OFF_INT | \
++	 RKCANFD_REG_INT_RX_FIFO_OVERFLOW_INT | \
++	 RKCANFD_REG_INT_RX_FIFO_FULL_INT | \
++	 RKCANFD_REG_INT_ERROR_INT | \
++	 RKCANFD_REG_INT_TX_ARBIT_FAIL_INT | \
++	 RKCANFD_REG_INT_PASSIVE_ERROR_INT | \
++	 RKCANFD_REG_INT_OVERLOAD_INT | \
++	 RKCANFD_REG_INT_ERROR_WARNING_INT | \
++	 RKCANFD_REG_INT_TX_FINISH_INT | \
++	 RKCANFD_REG_INT_RX_FINISH_INT)
++
++#define RKCANFD_REG_INT_ALL_ERROR \
++	(RKCANFD_REG_INT_BUS_OFF_INT | \
++	 RKCANFD_REG_INT_ERROR_INT | \
++	 RKCANFD_REG_INT_PASSIVE_ERROR_INT | \
++	 RKCANFD_REG_INT_ERROR_WARNING_INT)
++
++#define RKCANFD_REG_INT_MASK 0x010
++
++#define RKCANFD_REG_DMA_CTL 0x014
++#define RKCANFD_REG_DMA_CTL_DMA_RX_MODE BIT(1)
++#define RKCANFD_REG_DMA_CTL_DMA_TX_MODE BIT(9)
++
++#define RKCANFD_REG_BITTIMING 0x018
++#define RKCANFD_REG_BITTIMING_SAMPLE_MODE BIT(16)
++#define RKCANFD_REG_BITTIMING_SJW GENMASK(15, 14)
++#define RKCANFD_REG_BITTIMING_BRP GENMASK(13, 8)
++#define RKCANFD_REG_BITTIMING_TSEG2 GENMASK(6, 4)
++#define RKCANFD_REG_BITTIMING_TSEG1 GENMASK(3, 0)
++
++#define RKCANFD_REG_ARBITFAIL 0x028
++#define RKCANFD_REG_ARBITFAIL_ARBIT_FAIL_CODE GENMASK(6, 0)
++
++/* Register seems to be clear or read */
++#define RKCANFD_REG_ERROR_CODE 0x02c
++#define RKCANFD_REG_ERROR_CODE_PHASE BIT(29)
++#define RKCANFD_REG_ERROR_CODE_TYPE GENMASK(28, 26)
++#define RKCANFD_REG_ERROR_CODE_TYPE_BIT 0x0
++#define RKCANFD_REG_ERROR_CODE_TYPE_STUFF 0x1
++#define RKCANFD_REG_ERROR_CODE_TYPE_FORM 0x2
++#define RKCANFD_REG_ERROR_CODE_TYPE_ACK 0x3
++#define RKCANFD_REG_ERROR_CODE_TYPE_CRC 0x4
++#define RKCANFD_REG_ERROR_CODE_DIRECTION_RX BIT(25)
++#define RKCANFD_REG_ERROR_CODE_TX GENMASK(24, 16)
++#define RKCANFD_REG_ERROR_CODE_TX_OVERLOAD BIT(24)
++#define RKCANFD_REG_ERROR_CODE_TX_ERROR BIT(23)
++#define RKCANFD_REG_ERROR_CODE_TX_ACK BIT(22)
++#define RKCANFD_REG_ERROR_CODE_TX_ACK_EOF BIT(21)
++#define RKCANFD_REG_ERROR_CODE_TX_CRC BIT(20)
++#define RKCANFD_REG_ERROR_CODE_TX_STUFF_COUNT BIT(19)
++#define RKCANFD_REG_ERROR_CODE_TX_DATA BIT(18)
++#define RKCANFD_REG_ERROR_CODE_TX_SOF_DLC BIT(17)
++#define RKCANFD_REG_ERROR_CODE_TX_IDLE BIT(16)
++#define RKCANFD_REG_ERROR_CODE_RX GENMASK(15, 0)
++#define RKCANFD_REG_ERROR_CODE_RX_BUF_INT BIT(15)
++#define RKCANFD_REG_ERROR_CODE_RX_SPACE BIT(14)
++#define RKCANFD_REG_ERROR_CODE_RX_EOF BIT(13)
++#define RKCANFD_REG_ERROR_CODE_RX_ACK_LIM BIT(12)
++#define RKCANFD_REG_ERROR_CODE_RX_ACK BIT(11)
++#define RKCANFD_REG_ERROR_CODE_RX_CRC_LIM BIT(10)
++#define RKCANFD_REG_ERROR_CODE_RX_CRC BIT(9)
++#define RKCANFD_REG_ERROR_CODE_RX_STUFF_COUNT BIT(8)
++#define RKCANFD_REG_ERROR_CODE_RX_DATA BIT(7)
++#define RKCANFD_REG_ERROR_CODE_RX_DLC BIT(6)
++#define RKCANFD_REG_ERROR_CODE_RX_BRS_ESI BIT(5)
++#define RKCANFD_REG_ERROR_CODE_RX_RES BIT(4)
++#define RKCANFD_REG_ERROR_CODE_RX_FDF BIT(3)
++#define RKCANFD_REG_ERROR_CODE_RX_ID2_RTR BIT(2)
++#define RKCANFD_REG_ERROR_CODE_RX_SOF_IDE BIT(1)
++#define RKCANFD_REG_ERROR_CODE_RX_IDLE BIT(0)
++
++#define RKCANFD_REG_ERROR_CODE_NOACK \
++	(FIELD_PREP(RKCANFD_REG_ERROR_CODE_TYPE, \
++		    RKCANFD_REG_ERROR_CODE_TYPE_ACK) | \
++	 RKCANFD_REG_ERROR_CODE_TX_ACK_EOF | \
++	 RKCANFD_REG_ERROR_CODE_RX_ACK)
++
++#define RKCANFD_REG_RXERRORCNT 0x034
++#define RKCANFD_REG_RXERRORCNT_RX_ERR_CNT GENMASK(7, 0)
++
++#define RKCANFD_REG_TXERRORCNT 0x038
++#define RKCANFD_REG_TXERRORCNT_TX_ERR_CNT GENMASK(8, 0)
++
++#define RKCANFD_REG_IDCODE 0x03c
++#define RKCANFD_REG_IDCODE_STANDARD_FRAME_ID GENMASK(10, 0)
++#define RKCANFD_REG_IDCODE_EXTENDED_FRAME_ID GENMASK(28, 0)
++
++#define RKCANFD_REG_IDMASK 0x040
++
++#define RKCANFD_REG_TXFRAMEINFO 0x050
++#define RKCANFD_REG_FRAMEINFO_FRAME_FORMAT BIT(7)
++#define RKCANFD_REG_FRAMEINFO_RTR BIT(6)
++#define RKCANFD_REG_FRAMEINFO_DATA_LENGTH GENMASK(3, 0)
++
++#define RKCANFD_REG_TXID 0x054
++#define RKCANFD_REG_TXID_TX_ID GENMASK(28, 0)
++
++#define RKCANFD_REG_TXDATA0 0x058
++#define RKCANFD_REG_TXDATA1 0x05C
++#define RKCANFD_REG_RXFRAMEINFO 0x060
++#define RKCANFD_REG_RXID 0x064
++#define RKCANFD_REG_RXDATA0 0x068
++#define RKCANFD_REG_RXDATA1 0x06c
++
++#define RKCANFD_REG_RTL_VERSION 0x070
++#define RKCANFD_REG_RTL_VERSION_MAJOR GENMASK(7, 4)
++#define RKCANFD_REG_RTL_VERSION_MINOR GENMASK(3, 0)
++
++#define RKCANFD_REG_FD_NOMINAL_BITTIMING 0x100
++#define RKCANFD_REG_FD_NOMINAL_BITTIMING_SAMPLE_MODE BIT(31)
++#define RKCANFD_REG_FD_NOMINAL_BITTIMING_SJW GENMASK(30, 24)
++#define RKCANFD_REG_FD_NOMINAL_BITTIMING_BRP GENMASK(23, 16)
++#define RKCANFD_REG_FD_NOMINAL_BITTIMING_TSEG2 GENMASK(14, 8)
++#define RKCANFD_REG_FD_NOMINAL_BITTIMING_TSEG1 GENMASK(7, 0)
++
++#define RKCANFD_REG_FD_DATA_BITTIMING 0x104
++#define RKCANFD_REG_FD_DATA_BITTIMING_SAMPLE_MODE BIT(21)
++#define RKCANFD_REG_FD_DATA_BITTIMING_SJW GENMASK(20, 17)
++#define RKCANFD_REG_FD_DATA_BITTIMING_BRP GENMASK(16, 9)
++#define RKCANFD_REG_FD_DATA_BITTIMING_TSEG2 GENMASK(8, 5)
++#define RKCANFD_REG_FD_DATA_BITTIMING_TSEG1 GENMASK(4, 0)
++
++#define RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION 0x108
++#define RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION_TDC_OFFSET GENMASK(6, 1)
++#define RKCANFD_REG_TRANSMIT_DELAY_COMPENSATION_TDC_ENABLE BIT(0)
++
++#define RKCANFD_REG_TIMESTAMP_CTRL 0x10c
++/* datasheet says 6:1, which is wrong */
++#define RKCANFD_REG_TIMESTAMP_CTRL_TIME_BASE_COUNTER_PRESCALE GENMASK(5, 1)
++#define RKCANFD_REG_TIMESTAMP_CTRL_TIME_BASE_COUNTER_ENABLE BIT(0)
++
++#define RKCANFD_REG_TIMESTAMP 0x110
++
++#define RKCANFD_REG_TXEVENT_FIFO_CTRL 0x114
++#define RKCANFD_REG_TXEVENT_FIFO_CTRL_TXE_FIFO_CNT GENMASK(8, 5)
++#define RKCANFD_REG_TXEVENT_FIFO_CTRL_TXE_FIFO_WATERMARK GENMASK(4, 1)
++#define RKCANFD_REG_TXEVENT_FIFO_CTRL_TXE_FIFO_ENABLE BIT(0)
++
++#define RKCANFD_REG_RX_FIFO_CTRL 0x118
++#define RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_CNT GENMASK(6, 4)
++#define RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_FULL_WATERMARK GENMASK(3, 1)
++#define RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_ENABLE BIT(0)
++
++#define RKCANFD_REG_AFC_CTRL 0x11c
++#define RKCANFD_REG_AFC_CTRL_UAF5 BIT(4)
++#define RKCANFD_REG_AFC_CTRL_UAF4 BIT(3)
++#define RKCANFD_REG_AFC_CTRL_UAF3 BIT(2)
++#define RKCANFD_REG_AFC_CTRL_UAF2 BIT(1)
++#define RKCANFD_REG_AFC_CTRL_UAF1 BIT(0)
++
++#define RKCANFD_REG_IDCODE0 0x120
++#define RKCANFD_REG_IDMASK0 0x124
++#define RKCANFD_REG_IDCODE1 0x128
++#define RKCANFD_REG_IDMASK1 0x12c
++#define RKCANFD_REG_IDCODE2 0x130
++#define RKCANFD_REG_IDMASK2 0x134
++#define RKCANFD_REG_IDCODE3 0x138
++#define RKCANFD_REG_IDMASK3 0x13c
++#define RKCANFD_REG_IDCODE4 0x140
++#define RKCANFD_REG_IDMASK4 0x144
++
++#define RKCANFD_REG_FD_TXFRAMEINFO 0x200
++#define RKCANFD_REG_FD_FRAMEINFO_FRAME_FORMAT BIT(7)
++#define RKCANFD_REG_FD_FRAMEINFO_RTR BIT(6)
++#define RKCANFD_REG_FD_FRAMEINFO_FDF BIT(5)
++#define RKCANFD_REG_FD_FRAMEINFO_BRS BIT(4)
++#define RKCANFD_REG_FD_FRAMEINFO_DATA_LENGTH GENMASK(3, 0)
++
++#define RKCANFD_REG_FD_TXID 0x204
++#define RKCANFD_REG_FD_ID_EFF GENMASK(28, 0)
++#define RKCANFD_REG_FD_ID_SFF GENMASK(11, 0)
++
++#define RKCANFD_REG_FD_TXDATA0 0x208
++#define RKCANFD_REG_FD_TXDATA1 0x20c
++#define RKCANFD_REG_FD_TXDATA2 0x210
++#define RKCANFD_REG_FD_TXDATA3 0x214
++#define RKCANFD_REG_FD_TXDATA4 0x218
++#define RKCANFD_REG_FD_TXDATA5 0x21c
++#define RKCANFD_REG_FD_TXDATA6 0x220
++#define RKCANFD_REG_FD_TXDATA7 0x224
++#define RKCANFD_REG_FD_TXDATA8 0x228
++#define RKCANFD_REG_FD_TXDATA9 0x22c
++#define RKCANFD_REG_FD_TXDATA10 0x230
++#define RKCANFD_REG_FD_TXDATA11 0x234
++#define RKCANFD_REG_FD_TXDATA12 0x238
++#define RKCANFD_REG_FD_TXDATA13 0x23c
++#define RKCANFD_REG_FD_TXDATA14 0x240
++#define RKCANFD_REG_FD_TXDATA15 0x244
++
++#define RKCANFD_REG_FD_RXFRAMEINFO 0x300
++#define RKCANFD_REG_FD_RXID 0x304
++#define RKCANFD_REG_FD_RXTIMESTAMP 0x308
++#define RKCANFD_REG_FD_RXDATA0 0x30c
++#define RKCANFD_REG_FD_RXDATA1 0x310
++#define RKCANFD_REG_FD_RXDATA2 0x314
++#define RKCANFD_REG_FD_RXDATA3 0x318
++#define RKCANFD_REG_FD_RXDATA4 0x31c
++#define RKCANFD_REG_FD_RXDATA5 0x320
++#define RKCANFD_REG_FD_RXDATA6 0x320
++#define RKCANFD_REG_FD_RXDATA7 0x328
++#define RKCANFD_REG_FD_RXDATA8 0x32c
++#define RKCANFD_REG_FD_RXDATA9 0x330
++#define RKCANFD_REG_FD_RXDATA10 0x334
++#define RKCANFD_REG_FD_RXDATA11 0x338
++#define RKCANFD_REG_FD_RXDATA12 0x33c
++#define RKCANFD_REG_FD_RXDATA13 0x340
++#define RKCANFD_REG_FD_RXDATA14 0x344
++#define RKCANFD_REG_FD_RXDATA15 0x348
++
++#define RKCANFD_REG_RX_FIFO_RDATA 0x400
++#define RKCANFD_REG_TXE_FIFO_RDATA 0x500
++
++#define DEVICE_NAME "rockchip_canfd"
++#define RKCANFD_NAPI_WEIGHT 32
++#define RKCANFD_TXFIFO_DEPTH 2
++#define RKCANFD_TX_STOP_THRESHOLD 1
++#define RKCANFD_TX_START_THRESHOLD 1
++
++#define RKCANFD_TIMESTAMP_WORK_MAX_DELAY_SEC 60
++#define RKCANFD_ERRATUM_5_SYSCLOCK_HZ_MIN (300 * MEGA)
++
++/* rk3568 CAN-FD Errata, as of Tue 07 Nov 2023 11:25:31 +08:00 */
++
++/* Erratum 1: The error frame sent by the CAN controller has an
++ * abnormal format.
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_1 BIT(0)
++
++/* Erratum 2: The error frame sent after detecting a CRC error has an
++ * abnormal position.
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_2 BIT(1)
++
++/* Erratum 3: Intermittent CRC calculation errors. */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_3 BIT(2)
++
++/* Erratum 4: Intermittent occurrence of stuffing errors. */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_4 BIT(3)
++
++/* Erratum 5: Counters related to the TXFIFO and RXFIFO exhibit
++ * abnormal counting behavior.
++ *
++ * The rk3568 CAN-FD errata sheet as of Tue 07 Nov 2023 11:25:31 +08:00
++ * states that only the rk3568v2 is affected by this erratum, but
++ * tests with the rk3568v2 and rk3568v3 show that the RX_FIFO_CNT is
++ * sometimes too high. This leads to CAN frames being read from the
++ * FIFO, which is then already empty.
++ *
++ * Further tests on the rk3568v2 and rk3568v3 show that in this
++ * situation (i.e. empty FIFO) all elements of the FIFO header
++ * (frameinfo, id, ts) contain the same data.
++ *
++ * On the rk3568v2 and rk3568v3, this problem only occurs extremely
++ * rarely with the standard clock of 300 MHz, but almost immediately
++ * at 80 MHz.
++ *
++ * To workaround this problem, check for empty FIFO with
++ * rkcanfd_fifo_header_empty() in rkcanfd_handle_rx_int_one() and exit
++ * early.
++ *
++ * To reproduce:
++ * assigned-clocks = <&cru CLK_CANx>;
++ * assigned-clock-rates = <80000000>;
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_5 BIT(4)
++
++/* Erratum 6: The CAN controller's transmission of extended frames may
++ * intermittently change into standard frames
++ *
++ * Work around this issue by activating self reception (RXSTX). If we
++ * have pending TX CAN frames, check all RX'ed CAN frames in
++ * rkcanfd_rxstx_filter().
++ *
++ * If it's a frame we've send and it's OK, call the TX complete
++ * handler: rkcanfd_handle_tx_done_one(). Mask the TX complete IRQ.
++ *
++ * If it's a frame we've send, but the CAN-ID is mangled, resend the
++ * original extended frame.
++ *
++ * To reproduce:
++ * host:
++ *   canfdtest -evx -g can0
++ *   candump any,0:80000000 -cexdtA
++ * dut:
++ *   canfdtest -evx can0
++ *   ethtool -S can0
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_6 BIT(5)
++
++/* Erratum 7: In the passive error state, the CAN controller's
++ * interframe space segment counting is inaccurate.
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_7 BIT(6)
++
++/* Erratum 8: The Format-Error error flag is transmitted one bit
++ * later.
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_8 BIT(7)
++
++/* Erratum 9: In the arbitration segment, the CAN controller will
++ * identify stuffing errors as arbitration failures.
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_9 BIT(8)
++
++/* Erratum 10: Does not support the BUSOFF slow recovery mechanism. */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_10 BIT(9)
++
++/* Erratum 11: Arbitration error. */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_11 BIT(10)
++
++/* Erratum 12: A dominant bit at the third bit of the intermission may
++ * cause a transmission error.
++ */
++#define RKCANFD_QUIRK_RK3568_ERRATUM_12 BIT(11)
++
++/* Tests on the rk3568v2 and rk3568v3 show that receiving certain
++ * CAN-FD frames trigger an Error Interrupt.
++ *
++ * - Form Error in RX Arbitration Phase: TX_IDLE RX_STUFF_COUNT (0x0a010100) CMD=0 RX=0 TX=0
++ *   Error-Warning=1 Bus-Off=0
++ *   To reproduce:
++ *   host:
++ *     cansend can0 002##01f
++ *   DUT:
++ *     candump any,0:0,#FFFFFFFF -cexdHtA
++ *
++ * - Form Error in RX Arbitration Phase: TX_IDLE RX_CRC (0x0a010200) CMD=0 RX=0 TX=0
++ *   Error-Warning=1 Bus-Off=0
++ *   To reproduce:
++ *   host:
++ *     cansend can0 002##07217010000000000
++ *   DUT:
++ *     candump any,0:0,#FFFFFFFF -cexdHtA
++ */
++#define RKCANFD_QUIRK_CANFD_BROKEN BIT(12)
++
++/* known issues with rk3568v3:
++ *
++ * - Overload situation during high bus load
++ *   To reproduce:
++ *   host:
++ *     # add a 2nd CAN adapter to the CAN bus
++ *     cangen can0 -I 1 -Li -Di -p10 -g 0.3
++ *     cansequence -rve
++ *   DUT:
++ *     cangen can0 -I2 -L1 -Di -p10 -c10 -g 1 -e
++ *     cansequence -rv -i 1
++ *
++ * - TX starvation after repeated Bus-Off
++ *   To reproduce:
++ *   host:
++ *     sleep 3 && cangen can0 -I2 -Li -Di -p10 -g 0.0
++ *   DUT:
++ *     cangen can0 -I2 -Li -Di -p10 -g 0.05
++ */
++
++enum rkcanfd_model {
++	RKCANFD_MODEL_RK3568V2 = 0x35682,
++	RKCANFD_MODEL_RK3568V3 = 0x35683,
++};
++
++struct rkcanfd_devtype_data {
++	enum rkcanfd_model model;
++	u32 quirks;
++};
++
++struct rkcanfd_fifo_header {
++	u32 frameinfo;
++	u32 id;
++	u32 ts;
++};
++
++struct rkcanfd_stats {
++	struct u64_stats_sync syncp;
++
++	/* Erratum 5 */
++	u64_stats_t rx_fifo_empty_errors;
++
++	/* Erratum 6 */
++	u64_stats_t tx_extended_as_standard_errors;
++};
++
++struct rkcanfd_priv {
++	struct can_priv can;
++	struct can_rx_offload offload;
++	struct net_device *ndev;
++
++	void __iomem *regs;
++	unsigned int tx_head;
++	unsigned int tx_tail;
++
++	u32 reg_mode_default;
++	u32 reg_int_mask_default;
++	struct rkcanfd_devtype_data devtype_data;
++
++	struct cyclecounter cc;
++	struct timecounter tc;
++	struct delayed_work timestamp;
++	unsigned long work_delay_jiffies;
++
++	struct can_berr_counter bec;
++
++	struct rkcanfd_stats stats;
++
++	struct reset_control *reset;
++	struct clk_bulk_data *clks;
++	int clks_num;
++};
++
++static inline u32
++rkcanfd_read(const struct rkcanfd_priv *priv, u32 reg)
++{
++	return readl(priv->regs + reg);
++}
++
++static inline void
++rkcanfd_read_rep(const struct rkcanfd_priv *priv, u32 reg,
++		 void *buf, unsigned int len)
++{
++	readsl(priv->regs + reg, buf, len / sizeof(u32));
++}
++
++static inline void
++rkcanfd_write(const struct rkcanfd_priv *priv, u32 reg, u32 val)
++{
++	writel(val, priv->regs + reg);
++}
++
++static inline u32
++rkcanfd_get_timestamp(const struct rkcanfd_priv *priv)
++{
++	return rkcanfd_read(priv, RKCANFD_REG_TIMESTAMP);
++}
++
++static inline unsigned int
++rkcanfd_get_tx_head(const struct rkcanfd_priv *priv)
++{
++	return READ_ONCE(priv->tx_head) & (RKCANFD_TXFIFO_DEPTH - 1);
++}
++
++static inline unsigned int
++rkcanfd_get_tx_tail(const struct rkcanfd_priv *priv)
++{
++	return READ_ONCE(priv->tx_tail) & (RKCANFD_TXFIFO_DEPTH - 1);
++}
++
++static inline unsigned int
++rkcanfd_get_tx_pending(const struct rkcanfd_priv *priv)
++{
++	return READ_ONCE(priv->tx_head) - READ_ONCE(priv->tx_tail);
++}
++
++static inline unsigned int
++rkcanfd_get_tx_free(const struct rkcanfd_priv *priv)
++{
++	return RKCANFD_TXFIFO_DEPTH - rkcanfd_get_tx_pending(priv);
++}
++
++void rkcanfd_ethtool_init(struct rkcanfd_priv *priv);
++
++int rkcanfd_handle_rx_int(struct rkcanfd_priv *priv);
++
++void rkcanfd_skb_set_timestamp(const struct rkcanfd_priv *priv,
++			       struct sk_buff *skb, const u32 timestamp);
++void rkcanfd_timestamp_init(struct rkcanfd_priv *priv);
++void rkcanfd_timestamp_start(struct rkcanfd_priv *priv);
++void rkcanfd_timestamp_stop(struct rkcanfd_priv *priv);
++void rkcanfd_timestamp_stop_sync(struct rkcanfd_priv *priv);
++
++unsigned int rkcanfd_get_effective_tx_free(const struct rkcanfd_priv *priv);
++void rkcanfd_xmit_retry(struct rkcanfd_priv *priv);
++int rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev);
++void rkcanfd_handle_tx_done_one(struct rkcanfd_priv *priv, const u32 ts,
++				unsigned int *frame_len_p);
++
++#endif
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/rockchip_canfd-rx.c	2024-09-02 15:38:05.364337487 +0900
+@@ -0,0 +1,299 @@
++// SPDX-License-Identifier: GPL-2.0
++//
++// Copyright (c) 2023, 2024 Pengutronix,
++//               Marc Kleine-Budde <kernel@pengutronix.de>
++//
++
++#include <net/netdev_queues.h>
++
++#include "rockchip_canfd.h"
++
++static bool rkcanfd_can_frame_header_equal(const struct canfd_frame *const cfd1,
++					   const struct canfd_frame *const cfd2,
++					   const bool is_canfd)
++{
++	const u8 mask_flags = CANFD_BRS | CANFD_ESI | CANFD_FDF;
++	canid_t mask = CAN_EFF_FLAG;
++
++	if (canfd_sanitize_len(cfd1->len) != canfd_sanitize_len(cfd2->len))
++		return false;
++
++	if (!is_canfd)
++		mask |= CAN_RTR_FLAG;
++
++	if (cfd1->can_id & CAN_EFF_FLAG)
++		mask |= CAN_EFF_MASK;
++	else
++		mask |= CAN_SFF_MASK;
++
++	if ((cfd1->can_id & mask) != (cfd2->can_id & mask))
++		return false;
++
++	if (is_canfd &&
++	    (cfd1->flags & mask_flags) != (cfd2->flags & mask_flags))
++		return false;
++
++	return true;
++}
++
++static bool rkcanfd_can_frame_data_equal(const struct canfd_frame *cfd1,
++					 const struct canfd_frame *cfd2,
++					 const bool is_canfd)
++{
++	u8 len;
++
++	if (!is_canfd && (cfd1->can_id & CAN_RTR_FLAG))
++		return true;
++
++	len = canfd_sanitize_len(cfd1->len);
++
++	return !memcmp(cfd1->data, cfd2->data, len);
++}
++
++static unsigned int
++rkcanfd_fifo_header_to_cfd_header(const struct rkcanfd_priv *priv,
++				  const struct rkcanfd_fifo_header *header,
++				  struct canfd_frame *cfd)
++{
++	unsigned int len = sizeof(*cfd) - sizeof(cfd->data);
++	u8 dlc;
++
++	if (header->frameinfo & RKCANFD_REG_FD_FRAMEINFO_FRAME_FORMAT)
++		cfd->can_id = FIELD_GET(RKCANFD_REG_FD_ID_EFF, header->id) |
++			CAN_EFF_FLAG;
++	else
++		cfd->can_id = FIELD_GET(RKCANFD_REG_FD_ID_SFF, header->id);
++
++	dlc = FIELD_GET(RKCANFD_REG_FD_FRAMEINFO_DATA_LENGTH,
++			header->frameinfo);
++
++	/* CAN-FD */
++	if (header->frameinfo & RKCANFD_REG_FD_FRAMEINFO_FDF) {
++		cfd->len = can_fd_dlc2len(dlc);
++
++		/* The cfd is not allocated by alloc_canfd_skb(), so
++		 * set CANFD_FDF here.
++		 */
++		cfd->flags |= CANFD_FDF;
++
++		if (header->frameinfo & RKCANFD_REG_FD_FRAMEINFO_BRS)
++			cfd->flags |= CANFD_BRS;
++	} else {
++		cfd->len = can_cc_dlc2len(dlc);
++
++		if (header->frameinfo & RKCANFD_REG_FD_FRAMEINFO_RTR) {
++			cfd->can_id |= CAN_RTR_FLAG;
++
++			return len;
++		}
++	}
++
++	return len + cfd->len;
++}
++
++static int rkcanfd_rxstx_filter(struct rkcanfd_priv *priv,
++				const struct canfd_frame *cfd_rx, const u32 ts,
++				bool *tx_done)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	struct rkcanfd_stats *rkcanfd_stats = &priv->stats;
++	const struct canfd_frame *cfd_nominal;
++	const struct sk_buff *skb;
++	unsigned int tx_tail;
++
++	tx_tail = rkcanfd_get_tx_tail(priv);
++	skb = priv->can.echo_skb[tx_tail];
++	if (!skb) {
++		netdev_err(priv->ndev,
++			   "%s: echo_skb[%u]=NULL tx_head=0x%08x tx_tail=0x%08x\n",
++			   __func__, tx_tail,
++			   priv->tx_head, priv->tx_tail);
++
++		return -ENOMSG;
++	}
++	cfd_nominal = (struct canfd_frame *)skb->data;
++
++	/* We RX'ed a frame identical to our pending TX frame. */
++	if (rkcanfd_can_frame_header_equal(cfd_rx, cfd_nominal,
++					   cfd_rx->flags & CANFD_FDF) &&
++	    rkcanfd_can_frame_data_equal(cfd_rx, cfd_nominal,
++					 cfd_rx->flags & CANFD_FDF)) {
++		unsigned int frame_len;
++
++		rkcanfd_handle_tx_done_one(priv, ts, &frame_len);
++
++		WRITE_ONCE(priv->tx_tail, priv->tx_tail + 1);
++		netif_subqueue_completed_wake(priv->ndev, 0, 1, frame_len,
++					      rkcanfd_get_effective_tx_free(priv),
++					      RKCANFD_TX_START_THRESHOLD);
++
++		*tx_done = true;
++
++		return 0;
++	}
++
++	if (!(priv->devtype_data.quirks & RKCANFD_QUIRK_RK3568_ERRATUM_6))
++		return 0;
++
++	/* Erratum 6: Extended frames may be send as standard frames.
++	 *
++	 * Not affected if:
++	 * - TX'ed a standard frame -or-
++	 * - RX'ed an extended frame
++	 */
++	if (!(cfd_nominal->can_id & CAN_EFF_FLAG) ||
++	    (cfd_rx->can_id & CAN_EFF_FLAG))
++		return 0;
++
++	/* Not affected if:
++	 * - standard part and RTR flag of the TX'ed frame
++	 *   is not equal the CAN-ID and RTR flag of the RX'ed frame.
++	 */
++	if ((cfd_nominal->can_id & (CAN_RTR_FLAG | CAN_SFF_MASK)) !=
++	    (cfd_rx->can_id & (CAN_RTR_FLAG | CAN_SFF_MASK)))
++		return 0;
++
++	/* Not affected if:
++	 * - length is not the same
++	 */
++	if (cfd_nominal->len != cfd_rx->len)
++		return 0;
++
++	/* Not affected if:
++	 * - the data of non RTR frames is different
++	 */
++	if (!(cfd_nominal->can_id & CAN_RTR_FLAG) &&
++	    memcmp(cfd_nominal->data, cfd_rx->data, cfd_nominal->len))
++		return 0;
++
++	/* Affected by Erratum 6 */
++	u64_stats_update_begin(&rkcanfd_stats->syncp);
++	u64_stats_inc(&rkcanfd_stats->tx_extended_as_standard_errors);
++	u64_stats_update_end(&rkcanfd_stats->syncp);
++
++	/* Manual handling of CAN Bus Error counters. See
++	 * rkcanfd_get_corrected_berr_counter() for detailed
++	 * explanation.
++	 */
++	if (priv->bec.txerr)
++		priv->bec.txerr--;
++
++	*tx_done = true;
++
++	stats->tx_packets++;
++	stats->tx_errors++;
++
++	rkcanfd_xmit_retry(priv);
++
++	return 0;
++}
++
++static inline bool
++rkcanfd_fifo_header_empty(const struct rkcanfd_fifo_header *header)
++{
++	/* Erratum 5: If the FIFO is empty, we read the same value for
++	 * all elements.
++	 */
++	return header->frameinfo == header->id &&
++		header->frameinfo == header->ts;
++}
++
++static int rkcanfd_handle_rx_int_one(struct rkcanfd_priv *priv)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	struct canfd_frame cfd[1] = { }, *skb_cfd;
++	struct rkcanfd_fifo_header header[1] = { };
++	struct sk_buff *skb;
++	unsigned int len;
++	int err;
++
++	/* read header into separate struct and convert it later */
++	rkcanfd_read_rep(priv, RKCANFD_REG_RX_FIFO_RDATA,
++			 header, sizeof(*header));
++	/* read data directly into cfd */
++	rkcanfd_read_rep(priv, RKCANFD_REG_RX_FIFO_RDATA,
++			 cfd->data, sizeof(cfd->data));
++
++	/* Erratum 5: Counters for TXEFIFO and RXFIFO may be wrong */
++	if (rkcanfd_fifo_header_empty(header)) {
++		struct rkcanfd_stats *rkcanfd_stats = &priv->stats;
++
++		u64_stats_update_begin(&rkcanfd_stats->syncp);
++		u64_stats_inc(&rkcanfd_stats->rx_fifo_empty_errors);
++		u64_stats_update_end(&rkcanfd_stats->syncp);
++
++		return 0;
++	}
++
++	len = rkcanfd_fifo_header_to_cfd_header(priv, header, cfd);
++
++	/* Drop any received CAN-FD frames if CAN-FD mode is not
++	 * requested.
++	 */
++	if (header->frameinfo & RKCANFD_REG_FD_FRAMEINFO_FDF &&
++	    !(priv->can.ctrlmode & CAN_CTRLMODE_FD)) {
++		stats->rx_dropped++;
++
++		return 0;
++	}
++
++	if (rkcanfd_get_tx_pending(priv)) {
++		bool tx_done = false;
++
++		err = rkcanfd_rxstx_filter(priv, cfd, header->ts, &tx_done);
++		if (err)
++			return err;
++		if (tx_done && !(priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK))
++			return 0;
++	}
++
++	/* Manual handling of CAN Bus Error counters. See
++	 * rkcanfd_get_corrected_berr_counter() for detailed
++	 * explanation.
++	 */
++	if (priv->bec.rxerr)
++		priv->bec.rxerr = min(CAN_ERROR_PASSIVE_THRESHOLD,
++				      priv->bec.rxerr) - 1;
++
++	if (header->frameinfo & RKCANFD_REG_FD_FRAMEINFO_FDF)
++		skb = alloc_canfd_skb(priv->ndev, &skb_cfd);
++	else
++		skb = alloc_can_skb(priv->ndev, (struct can_frame **)&skb_cfd);
++
++	if (!skb) {
++		stats->rx_dropped++;
++
++		return 0;
++	}
++
++	memcpy(skb_cfd, cfd, len);
++	rkcanfd_skb_set_timestamp(priv, skb, header->ts);
++
++	err = can_rx_offload_queue_timestamp(&priv->offload, skb, header->ts);
++	if (err)
++		stats->rx_fifo_errors++;
++
++	return 0;
++}
++
++static inline unsigned int
++rkcanfd_rx_fifo_get_len(const struct rkcanfd_priv *priv)
++{
++	const u32 reg = rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL);
++
++	return FIELD_GET(RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_CNT, reg);
++}
++
++int rkcanfd_handle_rx_int(struct rkcanfd_priv *priv)
++{
++	unsigned int len;
++	int err;
++
++	while ((len = rkcanfd_rx_fifo_get_len(priv))) {
++		err = rkcanfd_handle_rx_int_one(priv);
++		if (err)
++			return err;
++	}
++
++	return 0;
++}
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/rockchip_canfd-timestamp.c	2024-09-02 15:37:52.132111695 +0900
+@@ -0,0 +1,105 @@
++// SPDX-License-Identifier: GPL-2.0
++//
++// Copyright (c) 2023, 2024 Pengutronix,
++//               Marc Kleine-Budde <kernel@pengutronix.de>
++//
++
++#include <linux/clocksource.h>
++
++#include "rockchip_canfd.h"
++
++static u64 rkcanfd_timestamp_read(const struct cyclecounter *cc)
++{
++	const struct rkcanfd_priv *priv = container_of(cc, struct rkcanfd_priv, cc);
++
++	return rkcanfd_get_timestamp(priv);
++}
++
++void rkcanfd_skb_set_timestamp(const struct rkcanfd_priv *priv,
++			       struct sk_buff *skb, const u32 timestamp)
++{
++	struct skb_shared_hwtstamps *hwtstamps = skb_hwtstamps(skb);
++	u64 ns;
++
++	ns = timecounter_cyc2time(&priv->tc, timestamp);
++
++	hwtstamps->hwtstamp = ns_to_ktime(ns);
++}
++
++static void rkcanfd_timestamp_work(struct work_struct *work)
++{
++	const struct delayed_work *delayed_work = to_delayed_work(work);
++	struct rkcanfd_priv *priv;
++
++	priv = container_of(delayed_work, struct rkcanfd_priv, timestamp);
++	timecounter_read(&priv->tc);
++
++	schedule_delayed_work(&priv->timestamp, priv->work_delay_jiffies);
++}
++
++void rkcanfd_timestamp_init(struct rkcanfd_priv *priv)
++{
++	const struct can_bittiming *dbt = &priv->can.data_bittiming;
++	const struct can_bittiming *bt = &priv->can.bittiming;
++	struct cyclecounter *cc = &priv->cc;
++	u32 bitrate, div, reg, rate;
++	u64 work_delay_ns;
++	u64 max_cycles;
++
++	/* At the standard clock rate of 300Mhz on the rk3658, the 32
++	 * bit timer overflows every 14s. This means that we have to
++	 * poll it quite often to avoid missing a wrap around.
++	 *
++	 * Divide it down to a reasonable rate, at least twice the bit
++	 * rate.
++	 */
++	bitrate = max(bt->bitrate, dbt->bitrate);
++	div = min(DIV_ROUND_UP(priv->can.clock.freq, bitrate * 2),
++		  FIELD_MAX(RKCANFD_REG_TIMESTAMP_CTRL_TIME_BASE_COUNTER_PRESCALE) + 1);
++
++	reg = FIELD_PREP(RKCANFD_REG_TIMESTAMP_CTRL_TIME_BASE_COUNTER_PRESCALE,
++			 div - 1) |
++		RKCANFD_REG_TIMESTAMP_CTRL_TIME_BASE_COUNTER_ENABLE;
++	rkcanfd_write(priv, RKCANFD_REG_TIMESTAMP_CTRL, reg);
++
++	cc->read = rkcanfd_timestamp_read;
++	cc->mask = CYCLECOUNTER_MASK(32);
++
++	rate = priv->can.clock.freq / div;
++	clocks_calc_mult_shift(&cc->mult, &cc->shift, rate, NSEC_PER_SEC,
++			       RKCANFD_TIMESTAMP_WORK_MAX_DELAY_SEC);
++
++	max_cycles = div_u64(ULLONG_MAX, cc->mult);
++	max_cycles = min(max_cycles, cc->mask);
++	work_delay_ns = clocksource_cyc2ns(max_cycles, cc->mult, cc->shift) / 3;
++	priv->work_delay_jiffies = nsecs_to_jiffies(work_delay_ns);
++	INIT_DELAYED_WORK(&priv->timestamp, rkcanfd_timestamp_work);
++
++	netdev_dbg(priv->ndev, "clock=%lu.%02luMHz bitrate=%lu.%02luMBit/s div=%u rate=%lu.%02luMHz mult=%u shift=%u delay=%lus\n",
++		   priv->can.clock.freq / MEGA,
++		   priv->can.clock.freq % MEGA / KILO / 10,
++		   bitrate / MEGA,
++		   bitrate % MEGA / KILO / 100,
++		   div,
++		   rate / MEGA,
++		   rate % MEGA / KILO / 10,
++		   cc->mult, cc->shift,
++		   priv->work_delay_jiffies / HZ);
++}
++
++void rkcanfd_timestamp_start(struct rkcanfd_priv *priv)
++{
++	timecounter_init(&priv->tc, &priv->cc, ktime_get_real_ns());
++
++	schedule_delayed_work(&priv->timestamp, priv->work_delay_jiffies);
++}
++
++void rkcanfd_timestamp_stop(struct rkcanfd_priv *priv)
++{
++	cancel_delayed_work(&priv->timestamp);
++}
++
++void rkcanfd_timestamp_stop_sync(struct rkcanfd_priv *priv)
++{
++	cancel_delayed_work_sync(&priv->timestamp);
++}
+
+--- /dev/null	2024-06-18 18:32:24.964000000 +0900
++++ b/drivers/net/can/rockchip/rockchip_canfd-tx.c	2024-09-02 15:43:31.505869270 +0900
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: GPL-2.0
++//
++// Copyright (c) 2023, 2024 Pengutronix,
++//               Marc Kleine-Budde <kernel@pengutronix.de>
++//
++
++#include <net/netdev_queues.h>
++
++#include "rockchip_canfd.h"
++
++static bool rkcanfd_tx_tail_is_eff(const struct rkcanfd_priv *priv)
++{
++	const struct canfd_frame *cfd;
++	const struct sk_buff *skb;
++	unsigned int tx_tail;
++
++	if (!rkcanfd_get_tx_pending(priv))
++		return false;
++
++	tx_tail = rkcanfd_get_tx_tail(priv);
++	skb = priv->can.echo_skb[tx_tail];
++	if (!skb) {
++		netdev_err(priv->ndev,
++			   "%s: echo_skb[%u]=NULL tx_head=0x%08x tx_tail=0x%08x\n",
++			   __func__, tx_tail,
++			   priv->tx_head, priv->tx_tail);
++
++		return false;
++	}
++
++	cfd = (struct canfd_frame *)skb->data;
++
++	return cfd->can_id & CAN_EFF_FLAG;
++}
++
++unsigned int rkcanfd_get_effective_tx_free(const struct rkcanfd_priv *priv)
++{
++	if (priv->devtype_data.quirks & RKCANFD_QUIRK_RK3568_ERRATUM_6 &&
++	    rkcanfd_tx_tail_is_eff(priv))
++		return 0;
++
++	return rkcanfd_get_tx_free(priv);
++}
++
++static void rkcanfd_start_xmit_write_cmd(const struct rkcanfd_priv *priv,
++					 const u32 reg_cmd)
++{
++	if (priv->devtype_data.quirks & RKCANFD_QUIRK_RK3568_ERRATUM_12)
++		rkcanfd_write(priv, RKCANFD_REG_MODE, priv->reg_mode_default |
++			      RKCANFD_REG_MODE_SPACE_RX_MODE);
++
++	rkcanfd_write(priv, RKCANFD_REG_CMD, reg_cmd);
++
++	if (priv->devtype_data.quirks & RKCANFD_QUIRK_RK3568_ERRATUM_12)
++		rkcanfd_write(priv, RKCANFD_REG_MODE, priv->reg_mode_default);
++}
++
++void rkcanfd_xmit_retry(struct rkcanfd_priv *priv)
++{
++	const unsigned int tx_head = rkcanfd_get_tx_head(priv);
++	const u32 reg_cmd = RKCANFD_REG_CMD_TX_REQ(tx_head);
++
++	rkcanfd_start_xmit_write_cmd(priv, reg_cmd);
++}
++
++int rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev)
++{
++	struct rkcanfd_priv *priv = netdev_priv(ndev);
++	u32 reg_frameinfo, reg_id, reg_cmd;
++	unsigned int tx_head, frame_len;
++	const struct canfd_frame *cfd;
++	int err;
++	u8 i;
++
++	if (can_dropped_invalid_skb(ndev, skb))
++		return NETDEV_TX_OK;
++
++	if (!netif_subqueue_maybe_stop(priv->ndev, 0,
++				       rkcanfd_get_effective_tx_free(priv),
++				       RKCANFD_TX_STOP_THRESHOLD,
++				       RKCANFD_TX_START_THRESHOLD)) {
++		if (net_ratelimit())
++			netdev_info(priv->ndev,
++				    "Stopping tx-queue (tx_head=0x%08x, tx_tail=0x%08x, tx_pending=%d)\n",
++				    priv->tx_head, priv->tx_tail,
++				    rkcanfd_get_tx_pending(priv));
++
++		return NETDEV_TX_BUSY;
++	}
++
++	cfd = (struct canfd_frame *)skb->data;
++
++	if (cfd->can_id & CAN_EFF_FLAG) {
++		reg_frameinfo = RKCANFD_REG_FD_FRAMEINFO_FRAME_FORMAT;
++		reg_id = FIELD_PREP(RKCANFD_REG_FD_ID_EFF, cfd->can_id);
++	} else {
++		reg_frameinfo = 0;
++		reg_id = FIELD_PREP(RKCANFD_REG_FD_ID_SFF, cfd->can_id);
++	}
++
++	if (cfd->can_id & CAN_RTR_FLAG)
++		reg_frameinfo |= RKCANFD_REG_FD_FRAMEINFO_RTR;
++
++	if (can_is_canfd_skb(skb)) {
++		reg_frameinfo |= RKCANFD_REG_FD_FRAMEINFO_FDF;
++
++		if (cfd->flags & CANFD_BRS)
++			reg_frameinfo |= RKCANFD_REG_FD_FRAMEINFO_BRS;
++
++		reg_frameinfo |= FIELD_PREP(RKCANFD_REG_FD_FRAMEINFO_DATA_LENGTH,
++					    can_fd_len2dlc(cfd->len));
++	} else {
++		reg_frameinfo |= FIELD_PREP(RKCANFD_REG_FD_FRAMEINFO_DATA_LENGTH,
++					    cfd->len);
++	}
++
++	tx_head = rkcanfd_get_tx_head(priv);
++	reg_cmd = RKCANFD_REG_CMD_TX_REQ(tx_head);
++
++	rkcanfd_write(priv, RKCANFD_REG_FD_TXFRAMEINFO, reg_frameinfo);
++	rkcanfd_write(priv, RKCANFD_REG_FD_TXID, reg_id);
++	for (i = 0; i < cfd->len; i += 4)
++		rkcanfd_write(priv, RKCANFD_REG_FD_TXDATA0 + i,
++			      *(u32 *)(cfd->data + i));
++
++	frame_len = can_skb_get_frame_len(skb);
++	err = can_put_echo_skb(skb, ndev, tx_head, frame_len);
++	if (!err)
++		netdev_sent_queue(priv->ndev, frame_len);
++
++	WRITE_ONCE(priv->tx_head, priv->tx_head + 1);
++
++	rkcanfd_start_xmit_write_cmd(priv, reg_cmd);
++
++	netif_subqueue_maybe_stop(priv->ndev, 0,
++				  rkcanfd_get_effective_tx_free(priv),
++				  RKCANFD_TX_STOP_THRESHOLD,
++				  RKCANFD_TX_START_THRESHOLD);
++
++	return NETDEV_TX_OK;
++}
++
++void rkcanfd_handle_tx_done_one(struct rkcanfd_priv *priv, const u32 ts,
++				unsigned int *frame_len_p)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	unsigned int tx_tail;
++	struct sk_buff *skb;
++
++	tx_tail = rkcanfd_get_tx_tail(priv);
++	skb = priv->can.echo_skb[tx_tail];
++
++	/* Manual handling of CAN Bus Error counters. See
++	 * rkcanfd_get_corrected_berr_counter() for detailed
++	 * explanation.
++	 */
++	if (priv->bec.txerr)
++		priv->bec.txerr--;
++
++	if (skb)
++		rkcanfd_skb_set_timestamp(priv, skb, ts);
++	stats->tx_bytes +=
++		can_rx_offload_get_echo_skb(&priv->offload,
++							    tx_tail, ts,
++							    frame_len_p);
++	stats->tx_packets++;
++}

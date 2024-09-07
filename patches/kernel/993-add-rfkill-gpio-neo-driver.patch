@@ -9,7 +9,7 @@ index 83a7af898..b92e702d1 100644
 +
 +config RFKILL_GPIO_NEO
 +	tristate "Neo GPIO RFKILL driver"
-+	depends on RFKILL_FULL
++	depends on RFKILL
 +	depends on OF_GPIO
 +	default n
 +	help
@@ -150,13 +150,13 @@ index 000000000..745e417e6
 +		rfkill->reset_wait_time = 0;
 +	}
 +
-+	gpio = devm_gpiod_get(&pdev->dev, "power", GPIOD_OUT_LOW);
++	gpio = devm_gpiod_get_optional(&pdev->dev, "power", GPIOD_OUT_LOW);
 +	if (IS_ERR(gpio))
 +		return PTR_ERR(gpio);
 +
 +	rfkill->power_gpio = gpio;
 +
-+	gpio = devm_gpiod_get(&pdev->dev, "reset", GPIOD_OUT_LOW);
++	gpio = devm_gpiod_get_optional(&pdev->dev, "reset", GPIOD_OUT_LOW);
 +	if (IS_ERR(gpio))
 +		return PTR_ERR(gpio);
 +
@@ -237,7 +237,7 @@ index 000000000..745e417e6
 +	{ .compatible = "rfkill-gpio-neo" },
 +	{}
 +};
-+MODULE_DEVICE_TABLE(of, wlan_platdata_of_match);
++MODULE_DEVICE_TABLE(of, rfkill_gpio_neo_of_match);
 +#endif /* CONFIG_OF */
 +
 +static struct platform_driver rfkill_gpio_neo_driver = {
