@@ -1,0 +1,11 @@
+--- drivers/gpu/drm/bridge/panel.c.orig	2024-09-11 16:20:56.816906681 +0900
++++ drivers/gpu/drm/bridge/panel.c	2024-09-11 16:21:58.237800840 +0900
+@@ -81,6 +81,8 @@
+ 		return ret;
+ 	}
+ 
++	drm_panel_bridge_set_orientation(connector, bridge);
++
+ 	drm_connector_attach_encoder(&panel_bridge->connector,
+ 					  bridge->encoder);
+ 
