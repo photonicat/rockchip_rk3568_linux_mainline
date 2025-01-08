@@ -717,3 +717,15 @@
 		remote-endpoint = <&dsi1_in_vp1>;
 	};
 };
+
+&spi2 {
+	status = "okay";
+
+	pinctrl-0 = <&spi2m1_cs0 &spi2m1_cs1 &spi2m1_pins>;
+
+	spidev@0 {
+		compatible = "micron,spi-authenta";
+		reg = <0>;
+		spi-max-frequency = <6000000>; 
+	};
+};

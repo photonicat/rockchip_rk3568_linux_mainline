@@ -44,9 +44,9 @@
 +&vcc3v3_sd {
 +	u-boot,dm-spl;
 +};
---- /dev/null
-+++ b/arch/arm/dts/rk3568-photonicat.dts
-@@ -0,0 +1,117 @@
+--- /dev/null	2025-01-02 14:46:08.512000000 +0900
++++ b/arch/arm/dts/rk3568-photonicat.dts	2025-01-07 20:16:50.987487755 +0900
+@@ -0,0 +1,126 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +
 +/dts-v1/;
@@ -124,8 +124,11 @@
 +
 +	pcat-wdt {
 +		compatible = "linux,wdt-pcat";
++		pinctrl-names = "default";
++		pinctrl-0 = <&pcat_wdt_recovery_h>;
 +		port = <&uart4>;
 +		status = "okay";
++		recovery-gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
 +	};
 +};
 +
@@ -133,6 +136,12 @@
 +	vcc_sd {
 +		vcc_sd_h: vcc-sd-h {
 +			rockchip,pins = <0 RK_PB6 RK_FUNC_GPIO &pcfg_pull_up>;
++		};
++	};
++
++	pcat_wdt_gpios {
++		pcat_wdt_recovery_h: pcat-wdt-recovery-h {
++			rockchip,pins = <1 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
 +		};
 +	};
 +};
@@ -166,7 +175,7 @@
 +};
 --- /dev/null
 +++ b/configs/photonicat-rk3568_defconfig
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,100 @@
 +CONFIG_ARM=y
 +CONFIG_SKIP_LOWLEVEL_INIT=y
 +CONFIG_COUNTER_FREQUENCY=24000000
@@ -266,6 +275,7 @@
 +CONFIG_WDT_PCAT=y
 +CONFIG_CMD_WDT=y
 +CONFIG_WATCHDOG_AUTOSTART=n
++CONFIG_CMD_GPIO_READ=y
 --- a/drivers/watchdog/Makefile
 +++ b/drivers/watchdog/Makefile
 @@ -44,3 +44,4 @@
@@ -285,14 +295,15 @@
 +	help
 +	  Select this to enable watchdog timer on photonicat board.
  endmenu
---- /dev/null
-+++ b/drivers/watchdog/pcat_wdt.c
-@@ -0,0 +1,193 @@
+--- /dev/null	2025-01-02 14:46:08.512000000 +0900
++++ b/drivers/watchdog/pcat_wdt.c	2025-01-08 12:44:17.325003675 +0900
+@@ -0,0 +1,213 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +
 +#include <dm.h>
 +#include <dm/device_compat.h>
 +#include <wdt.h>
++#include <env.h>
 +#include <asm/gpio.h>
 +#include <linux/delay.h>
 +#include <serial.h>
@@ -302,6 +313,8 @@
 +	struct udevice *serial_dev;
 +	struct dm_serial_ops *serial_ops;
 +	uint16_t packet_count;
++	struct gpio_desc recovery_gpio;
++	int recovery_mode;
 +};
 +
 +static uint16_t pcat_pmu_serial_compute_crc16(const uint8_t *data,
@@ -397,6 +410,10 @@
 +		}
 +	}
 +
++	if(priv->recovery_mode) {
++		env_set("pcat_recovery", "1");
++	}
++
 +	return err;
 +}
 +
@@ -456,6 +473,19 @@
 +	priv->serial_dev = serial_dev;
 +	priv->serial_ops = ops;
 +	priv->packet_count = 0;
++
++	if(!gpio_request_by_name(dev, "recovery-gpios", 0,
++		&priv->recovery_gpio, GPIOD_IS_IN)) {
++		if(dm_gpio_is_valid(&priv->recovery_gpio)) {
++			priv->recovery_mode =
++				dm_gpio_get_value(&priv->recovery_gpio);
++		}
++	}
++
++	if(priv->recovery_mode) {
++		printf("photonicat recovery mode enabled.\n");
++		env_set("pcat_recovery", "1");
++	}
 +
 +	pcat_wdt_stop(dev);
 +
